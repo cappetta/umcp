@@ -13,6 +13,13 @@ from fastapi import Body, FastAPI, HTTPException, Query
 from fastapi import Path as ApiPath
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
 
+from .story_seed import (
+    STORY_WORKFLOW_ID,
+    StoryAlreadyExistsError,
+    StoryNotFoundError,
+    get_workflow_story,
+    seed_unified_memory_story,
+)
 from .ums_models import *
 from .ums_services import *
 from .ums_database import get_db_connection, get_database_path
@@ -165,6 +172,47 @@ def setup_ums_api(app: FastAPI) -> None:
     @app.get("/ums-explorer", include_in_schema=False)
     async def ums_explorer_redirect():
         return RedirectResponse(url="/api/tools/ums_explorer.html")
+
+    # ---------- Story seeding and retrieval ----------
+
+    @app.post(
+        "/stories/mission-cerberus",
+        summary="Seed the Mission Cerberus demo story",
+        tags=["Unified Memory Story"],
+    )
+    async def seed_mission_cerberus_story(
+        force: bool = Query(
+            False,
+            description="Force reseeding by clearing existing Mission Cerberus data",
+        )
+    ) -> Dict[str, Any]:
+        try:
+            result = seed_unified_memory_story(str(database_path), force=force)
+        except StoryAlreadyExistsError as exc:  # pragma: no cover - HTTP path
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return result.to_dict()
+
+    @app.get(
+        "/workflows/{workflow_id}/story",
+        summary="Retrieve aggregated story view for a workflow",
+        tags=["Unified Memory Story"],
+    )
+    async def get_workflow_story_view(workflow_id: str) -> Dict[str, Any]:
+        try:
+            return get_workflow_story(workflow_id, db_path=str(database_path))
+        except StoryNotFoundError as exc:  # pragma: no cover - HTTP path
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get(
+        "/stories/mission-cerberus",
+        summary="Convenience endpoint for Mission Cerberus story",
+        tags=["Unified Memory Story"],
+    )
+    async def get_mission_cerberus_story() -> Dict[str, Any]:
+        try:
+            return get_workflow_story(STORY_WORKFLOW_ID, db_path=str(database_path))
+        except StoryNotFoundError as exc:  # pragma: no cover - HTTP path
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     # ---------- Cognitive-states endpoint ----------
     @app.get(
