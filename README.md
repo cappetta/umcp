@@ -2401,6 +2401,14 @@ python examples/text_redline_demo.py --input-file1 path/to/doc1.txt --input-file
 
 This combined example library and testing framework provides invaluable resources for understanding, utilizing, and verifying the functionality of the Ultimate MCP Server.
 
+#### Unified Memory Coverage Story
+
+-   **End-to-end staging utility**: `UnifiedMemoryStoryBuilder` seeds a cohesive outage-triage workflow that exercises every unified memory table (`workflows`, `goals`, `actions`, `artifacts`, `artifact_relationships`, `memories`, `memory_links`, and `cognitive_timeline_states`).
+-   **Unit tests**: `tests/unit/test_unified_memory_story.py` validates that the staged data remains internally consistent and that contextual metadata is preserved.
+-   **Behavioral specification**: `tests/features/unified_memory_story.feature` captures the support-triage narrative in Gherkin, ensuring the database continues to reflect a realistic cognitive trace as the schema evolves.
+
+Together these checks provide fast feedback that the unified agent memory database is populated and queried in a way that mirrors real-world agent activity.
+
 ---
 
 ## 💻 CLI Commands
