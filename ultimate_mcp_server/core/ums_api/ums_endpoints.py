@@ -15,7 +15,7 @@ from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Resp
 
 from .ums_models import *
 from .ums_services import *
-from .ums_database import get_db_connection
+from .ums_database import get_db_connection, get_database_path
 
 def setup_ums_api(app: FastAPI) -> None:
     """
@@ -45,16 +45,11 @@ def setup_ums_api(app: FastAPI) -> None:
     # -------------------------------------------------
 
     # Paths & database setup
-    project_root = Path(__file__).resolve().parent.parent.parent
-    tools_dir = project_root / "ultimate_mcp_server" / "tools"
-    storage_dir = project_root / "storage"
-    DATABASE_PATH = str(storage_dir / "unified_agent_memory.db")
-
-    def get_db_connection() -> sqlite3.Connection:
-        """Return a SQLite connection with row factory."""
-        conn = sqlite3.connect(DATABASE_PATH)
-        conn.row_factory = sqlite3.Row
-        return conn
+    package_root = Path(__file__).resolve().parents[2]
+    database_path = Path(get_database_path())
+    storage_dir = database_path.parent
+    storage_dir.mkdir(parents=True, exist_ok=True)
+    tools_dir = package_root / "tools"
 
     # ---------- Helper functions ----------
     def _dict_depth(d: Dict[str, Any], depth: int = 0) -> int:
@@ -155,10 +150,9 @@ def setup_ums_api(app: FastAPI) -> None:
 
     @app.get("/storage/unified_agent_memory.db", include_in_schema=False)
     async def serve_database():
-        db_path = storage_dir / "unified_agent_memory.db"
-        if db_path.exists():
+        if database_path.exists():
             return FileResponse(
-                str(db_path),
+                str(database_path),
                 media_type="application/x-sqlite3",
                 filename="unified_agent_memory.db",
             )
