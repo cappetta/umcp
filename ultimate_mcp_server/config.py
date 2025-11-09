@@ -11,9 +11,74 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
-import yaml
-from decouple import Config as DecoupleConfig
-from decouple import RepositoryEnv, UndefinedValueError
+try:
+    import yaml
+except ModuleNotFoundError:  # pragma: no cover - exercised in minimal environments
+    class _YamlFallback:
+        class YAMLError(Exception):
+            """Fallback YAML error used when PyYAML is unavailable."""
+
+            pass
+
+        @staticmethod
+        def safe_load(stream):
+            """Minimal YAML loader that supports JSON subsets when PyYAML is missing."""
+
+            data = stream.read()
+            if not data.strip():
+                return None
+            try:
+                return json.loads(data)
+            except json.JSONDecodeError as exc:  # pragma: no cover - error path
+                raise _YamlFallback.YAMLError(
+                    "PyYAML is required to parse YAML configuration"
+                ) from exc
+
+    yaml = _YamlFallback()
+try:
+    from decouple import Config as DecoupleConfig
+    from decouple import RepositoryEnv, UndefinedValueError
+except ModuleNotFoundError:  # pragma: no cover - exercised in minimal environments
+    class UndefinedValueError(Exception):
+        """Fallback error when python-decouple is unavailable."""
+
+        pass
+
+    class RepositoryEnv:
+        """Placeholder repository that mimics python-decouple's interface."""
+
+        def __init__(self, path: str):
+            self.path = path
+
+    class DecoupleConfig:
+        """Very small subset of python-decouple used for tests."""
+
+        def __init__(self, repository: RepositoryEnv):
+            self.repository = repository
+
+        def _get_env(self, key: str) -> Optional[str]:
+            return os.environ.get(key)
+
+        def get(self, key: str, default: Optional[Any] = None, cast: Optional[Any] = None):
+            value = self._get_env(key)
+            if value is None:
+                return default
+            if cast:
+                return cast(value)
+            return value
+
+        def __call__(self, key: str, default: Optional[Any] = None, cast: Optional[Any] = None):
+            value = self._get_env(key)
+            if value is None:
+                if default is not None:
+                    return default
+                raise UndefinedValueError(f"Environment variable '{key}' not found")
+            if cast:
+                try:
+                    return cast(value)
+                except Exception as exc:  # pragma: no cover - error path
+                    raise ValueError(f"Failed casting environment variable '{key}'") from exc
+            return value
 from pydantic import BaseModel, Field, ValidationError, field_validator
 
 # from pydantic_settings import BaseSettings, SettingsConfigDict # Removed BaseSettings
