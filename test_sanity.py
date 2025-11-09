@@ -2,6 +2,7 @@
 import argparse
 import asyncio
 import json
+import time
 import sys
 from typing import Any, Dict, List, Tuple
 from urllib import request, error as urlerror
@@ -355,6 +356,91 @@ async def main():
 
         # 8) Exercise the HTTP API endpoints (OpenAPI + Cognitive States)
         await exercise_http_api(api_base, args.timeout)
+
+        # 9) Smoke-test common tools safely
+        print("== tool_smoke_tests ==")
+        def tool_exists(name: str) -> bool:
+            return name in tool_names
+
+        results_summary: List[Tuple[str, bool, str]] = []
+
+        async def safe_call(name: str, params: Dict[str, Any]) -> Tuple[str, bool, str]:
+            try:
+                if not tool_exists(name):
+                    return name, False, "SKIP (not registered)"
+                resp = await call_tool(name, params)
+                ok = True
+                # Respect common response shapes
+                if isinstance(resp, dict):
+                    if resp.get("isError") or resp.get("success") is False:
+                        ok = False
+                return name, ok, "ok" if ok else (resp.get("error") or "error")
+            except Exception as e:
+                return name, False, str(e)[:200]
+
+        # Echo
+        results_summary.append(await safe_call("echo", {"message": "hello from sanity"}))
+
+        # Filesystem suite
+        allowed_dirs: List[str] = []
+        if tool_exists("list_allowed_directories"):
+            try:
+                lad = await call_tool("list_allowed_directories", {})
+                allowed_dirs = lad.get("directories") or []
+            except Exception:
+                allowed_dirs = []
+
+        test_root = None
+        if allowed_dirs:
+            base_dir = allowed_dirs[0].rstrip("/")
+            test_root = f"{base_dir}/sanity_test_{int(time.time())}"
+            results_summary.append(await safe_call("create_directory", {"path": test_root}))
+
+            # unique file path and write/read/edit/move/delete
+            desired_file = f"{test_root}/file.txt"
+            test_file = desired_file
+            if tool_exists("get_unique_filepath"):
+                try:
+                    uniq_resp = await call_tool("get_unique_filepath", {"path": desired_file})
+                    if isinstance(uniq_resp, dict) and uniq_resp.get("path"):
+                        test_file = uniq_resp["path"]
+                    results_summary.append(("get_unique_filepath", True, test_file))
+                except Exception as e:
+                    results_summary.append(("get_unique_filepath", False, str(e)[:200]))
+
+            results_summary.append(await safe_call("write_file", {"path": test_file, "content": "alpha\nBravo\ncharlie"}))
+            results_summary.append(await safe_call("read_file", {"path": test_file}))
+            results_summary.append(await safe_call("edit_file", {"path": test_file, "edits": [{"oldText": "Bravo", "newText": "beta"}], "dry_run": False}))
+            results_summary.append(await safe_call("list_directory", {"path": test_root}))
+            results_summary.append(await safe_call("directory_tree", {"path": test_root, "max_depth": 2}))
+            results_summary.append(await safe_call("get_file_info", {"path": test_file}))
+            results_summary.append(await safe_call("search_files", {"path": test_root, "pattern": "alpha", "case_sensitive": False, "search_content": True}))
+
+            moved_file = f"{test_root}/file_renamed.txt"
+            results_summary.append(await safe_call("move_file", {"source": test_file, "destination": moved_file, "overwrite": True}))
+            # Delete file and dir
+            results_summary.append(await safe_call("delete_path", {"path": moved_file}))
+            results_summary.append(await safe_call("delete_path", {"path": test_root}))
+        else:
+            results_summary.append(("filesystem", False, "SKIP (no allowed directories)"))
+
+        # Local text tools using input_data (no file paths)
+        results_summary.append(await safe_call("run_ripgrep", {"args_str": "'alpha'", "input_data": "alpha\nbeta\n", "input_file": False, "input_dir": False}))
+        results_summary.append(await safe_call("run_sed", {"args_str": "'s/alpha/beta/g'", "input_data": "alpha x alpha", "input_file": False}))
+        results_summary.append(await safe_call("run_awk", {"args_str": "'{print $1}'", "input_data": "one two\nthree four", "input_file": False}))
+        results_summary.append(await safe_call("run_jq", {"args_str": "'.a' -r", "input_data": "{\"a\": 123}", "input_file": False}))
+
+        # Python sandbox (optional; may be unavailable). Keep quick.
+        results_summary.append(await safe_call("execute_python", {"code": "result=2+2\nprint(result)", "timeout_ms": 5000, "allow_network": False, "allow_fs": False}))
+
+        # Print compact summary
+        ok_count = sum(1 for _n, ok, _m in results_summary if ok)
+        total = len(results_summary)
+        print(f"tool_smoke_tests: {ok_count}/{total} passed")
+        for name, ok, msg in results_summary:
+            status = "ok" if ok else "FAIL"
+            print(f"  {name}: {status} - {str(msg)[:120]}")
+        print()
 
     finally:
         # Gracefully close using any supported method
