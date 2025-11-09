@@ -6,6 +6,7 @@ from typing import Any, AsyncGenerator, Dict, List, Optional, Tuple
 from ultimate_mcp_server.config import get_config
 from ultimate_mcp_server.constants import COST_PER_MILLION_TOKENS, Provider
 from ultimate_mcp_server.utils import get_logger
+from ultimate_mcp_server.utils.usage_metrics import log_model_usage
 
 logger = get_logger(__name__)
 
@@ -82,9 +83,23 @@ class ModelResponse:
         self.processing_time = processing_time
         self.raw_response = raw_response
         self.metadata = metadata or {}
-        
+
         # Calculate cost based on token usage
         self.cost = self._calculate_cost()
+
+        try:
+            log_model_usage(
+                provider=self.provider,
+                model=self.model,
+                input_tokens=self.input_tokens,
+                output_tokens=self.output_tokens,
+                total_tokens=self.total_tokens,
+                cost=self.cost,
+                processing_time=self.processing_time,
+                metadata=self.metadata,
+            )
+        except Exception:
+            logger.debug("Failed to persist model usage metrics", exc_info=True)
         
     def _calculate_cost(self) -> float:
         """
