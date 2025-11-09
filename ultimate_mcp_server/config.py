@@ -11,9 +11,80 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
-import yaml
-from decouple import Config as DecoupleConfig
-from decouple import RepositoryEnv, UndefinedValueError
+try:
+    import yaml
+except ModuleNotFoundError:  # pragma: no cover - fallback when PyYAML isn't installed
+    class _YamlShim:
+        """Minimal YAML shim that falls back to JSON parsing."""
+
+        class YAMLError(Exception):
+            """Raised when the shim cannot parse the provided content."""
+
+            pass
+
+        @staticmethod
+        def safe_load(stream):
+            data = stream.read()
+            if not data.strip():
+                return {}
+            try:
+                return json.loads(data)
+            except json.JSONDecodeError as exc:  # pragma: no cover - mirrors yaml.YAMLError
+                raise _YamlShim.YAMLError(str(exc)) from exc
+
+        @staticmethod
+        def safe_dump(data, stream=None):  # pragma: no cover - rarely used in tests
+            text = json.dumps(data)
+            if stream is None:
+                return text
+            stream.write(text)
+            return text
+
+    yaml = _YamlShim()  # type: ignore
+try:
+    from decouple import Config as DecoupleConfig
+    from decouple import RepositoryEnv, UndefinedValueError
+except ModuleNotFoundError:  # pragma: no cover - lightweight fallback for tests
+    class UndefinedValueError(Exception):
+        """Raised when a configuration value is undefined."""
+
+        pass
+
+    class RepositoryEnv:
+        """Minimal stand-in that ignores .env files when decouple is unavailable."""
+
+        def __init__(self, _path: str):
+            self.path = _path
+
+    class DecoupleConfig:
+        """Simple environment-backed configuration shim."""
+
+        def __init__(self, _repository: RepositoryEnv):
+            self.repository = _repository
+
+        def _read(self, key: str, default: Any = None) -> Any:
+            if key in os.environ:
+                return os.environ[key]
+            if default is not None:
+                return default
+            raise UndefinedValueError(f"{key} not found")
+
+        def get(self, key: str, default: Any = None, cast: Any = None) -> Any:
+            value = self._read(key, default)
+            if cast and value is not None:
+                try:
+                    return cast(value)
+                except Exception as exc:  # pragma: no cover - mirrors decouple behaviour
+                    raise ValueError(str(exc)) from exc
+            return value
+
+        def __call__(self, key: str, default: Any = None, cast: Any = None) -> Any:
+            try:
+                return self.get(key, default=default, cast=cast)
+            except UndefinedValueError:
+                if default is not None:
+                    return default
+                raise
 from pydantic import BaseModel, Field, ValidationError, field_validator
 
 # from pydantic_settings import BaseSettings, SettingsConfigDict # Removed BaseSettings
