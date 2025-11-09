@@ -1201,107 +1201,415 @@ def _ensure_parent_dir(path: str) -> None:
 
 
 def initialize_unified_memory_schema(db_path: str) -> None:
-    """Create required SQLite tables if they don't exist.
+    """Create or migrate the SQLite schema required by UMS HTTP endpoints."""
 
-    This prevents 500 errors like 'no such table: actions/artifacts/cognitive_timeline_states'.
-    The schema is intentionally minimal and compatible with usages in this codebase.
-    """
+    def _table_exists(cursor: sqlite3.Cursor, table: str) -> bool:
+        cursor.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table,)
+        )
+        return cursor.fetchone() is not None
+
+    def _existing_columns(cursor: sqlite3.Cursor, table: str) -> set[str]:
+        cursor.execute(f"PRAGMA table_info({table})")
+        return {row[1] for row in cursor.fetchall()}
+
+    def _ensure_columns(cursor: sqlite3.Cursor, table: str, columns: dict[str, str]) -> None:
+        existing = _existing_columns(cursor, table)
+        for name, definition in columns.items():
+            if name not in existing:
+                cursor.execute(f"ALTER TABLE {table} ADD COLUMN {definition}")
+
+    def _ensure_unique_ids(
+        cursor: sqlite3.Cursor,
+        table: str,
+        column: str,
+        legacy_column_candidates: list[str],
+        prefix: str,
+    ) -> None:
+        existing = _existing_columns(cursor, table)
+        if column not in existing:
+            cursor.execute(f"ALTER TABLE {table} ADD COLUMN {column} TEXT")
+            existing.add(column)
+
+        legacy_cols = [col for col in legacy_column_candidates if col in existing]
+        coalesce_args = legacy_cols + ["rowid"]
+        legacy_expr = "COALESCE(" + ", ".join(coalesce_args) + ")"
+        cursor.execute(
+            f"UPDATE {table} SET {column} = printf(?, {legacy_expr}) "
+            f"WHERE {column} IS NULL OR {column} = ''",
+            (f"{prefix}_%s",),
+        )
+        cursor.execute(
+            f"CREATE UNIQUE INDEX IF NOT EXISTS idx_{table}_{column} ON {table}({column})"
+        )
+
     _ensure_parent_dir(db_path)
     conn = sqlite3.connect(db_path)
     try:
         cur = conn.cursor()
+        cur.execute("PRAGMA foreign_keys=ON")
 
-        # Core memories table used throughout UMS
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS memories (
-                memory_id TEXT PRIMARY KEY,
-                content TEXT NOT NULL,
-                memory_type TEXT,
-                memory_level TEXT,
-                importance INTEGER DEFAULT 1,
-                confidence REAL DEFAULT 0.5,
-                created_at REAL,
-                last_accessed_at REAL,
-                access_count INTEGER DEFAULT 0,
-                workflow_id TEXT,
-                archived INTEGER DEFAULT 0
+        # --- Workflows table -------------------------------------------------
+        if not _table_exists(cur, "workflows"):
+            cur.execute(
+                """
+                CREATE TABLE workflows (
+                    workflow_id TEXT PRIMARY KEY,
+                    title TEXT,
+                    description TEXT,
+                    goal TEXT,
+                    status TEXT,
+                    created_at REAL,
+                    updated_at REAL,
+                    last_active REAL,
+                    metadata TEXT
+                )
+                """
             )
-            """
+        else:
+            _ensure_columns(
+                cur,
+                "workflows",
+                {
+                    "workflow_id": "workflow_id TEXT",
+                    "title": "title TEXT",
+                    "description": "description TEXT",
+                    "goal": "goal TEXT",
+                    "status": "status TEXT",
+                    "created_at": "created_at REAL",
+                    "updated_at": "updated_at REAL",
+                    "last_active": "last_active REAL",
+                    "metadata": "metadata TEXT",
+                },
+            )
+
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_workflows_status ON workflows(status)"
         )
 
-        # Links between memories
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS memory_links (
-                source_memory_id TEXT,
-                target_memory_id TEXT
+        # --- Memories table --------------------------------------------------
+        if not _table_exists(cur, "memories"):
+            cur.execute(
+                """
+                CREATE TABLE memories (
+                    memory_id TEXT PRIMARY KEY,
+                    workflow_id TEXT,
+                    content TEXT NOT NULL,
+                    memory_type TEXT,
+                    memory_level TEXT,
+                    importance REAL DEFAULT 1,
+                    confidence REAL DEFAULT 0.5,
+                    description TEXT,
+                    reasoning TEXT,
+                    created_at REAL,
+                    updated_at REAL,
+                    last_accessed_at REAL,
+                    access_count INTEGER DEFAULT 0,
+                    archived INTEGER DEFAULT 0,
+                    FOREIGN KEY (workflow_id) REFERENCES workflows(workflow_id)
+                )
+                """
             )
-            """
+        else:
+            _ensure_columns(
+                cur,
+                "memories",
+                {
+                    "memory_id": "memory_id TEXT",
+                    "workflow_id": "workflow_id TEXT",
+                    "memory_type": "memory_type TEXT",
+                    "memory_level": "memory_level TEXT",
+                    "importance": "importance REAL",
+                    "confidence": "confidence REAL",
+                    "description": "description TEXT",
+                    "reasoning": "reasoning TEXT",
+                    "created_at": "created_at REAL",
+                    "updated_at": "updated_at REAL",
+                    "last_accessed_at": "last_accessed_at REAL",
+                    "access_count": "access_count INTEGER",
+                    "archived": "archived INTEGER",
+                },
+            )
+
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_memories_workflow ON memories(workflow_id)"
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_memories_created ON memories(created_at)"
+        )
+        cur.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_memories_memory_id ON memories(memory_id)"
         )
 
-        # Actions table (referenced by analysis and API endpoints)
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS actions (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                memory_id TEXT,
-                action_type TEXT,
-                status TEXT,
-                input_data TEXT,
-                output_data TEXT,
-                created_at REAL,
-                updated_at REAL
+        # --- Memory links table ---------------------------------------------
+        if not _table_exists(cur, "memory_links"):
+            cur.execute(
+                """
+                CREATE TABLE memory_links (
+                    link_id TEXT PRIMARY KEY,
+                    source_memory_id TEXT,
+                    target_memory_id TEXT,
+                    link_type TEXT,
+                    strength REAL DEFAULT 1,
+                    created_at REAL,
+                    FOREIGN KEY (source_memory_id) REFERENCES memories(memory_id),
+                    FOREIGN KEY (target_memory_id) REFERENCES memories(memory_id)
+                )
+                """
             )
-            """
+        else:
+            _ensure_columns(
+                cur,
+                "memory_links",
+                {
+                    "link_id": "link_id TEXT",
+                    "source_memory_id": "source_memory_id TEXT",
+                    "target_memory_id": "target_memory_id TEXT",
+                    "link_type": "link_type TEXT",
+                    "strength": "strength REAL",
+                    "created_at": "created_at REAL",
+                },
+            )
+
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_memory_links_source ON memory_links(source_memory_id)"
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_memory_links_target ON memory_links(target_memory_id)"
         )
 
-        # Goals table (lightweight; referenced in orphan checks)
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS goals (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                memory_id TEXT,
-                description TEXT,
-                status TEXT,
-                created_at REAL
+        # --- Goals table -----------------------------------------------------
+        if not _table_exists(cur, "goals"):
+            cur.execute(
+                """
+                CREATE TABLE goals (
+                    goal_id TEXT PRIMARY KEY,
+                    workflow_id TEXT,
+                    parent_goal_id TEXT,
+                    description TEXT,
+                    status TEXT,
+                    priority INTEGER,
+                    created_at REAL,
+                    updated_at REAL,
+                    completed_at REAL,
+                    FOREIGN KEY (workflow_id) REFERENCES workflows(workflow_id)
+                )
+                """
             )
-            """
+        else:
+            _ensure_columns(
+                cur,
+                "goals",
+                {
+                    "goal_id": "goal_id TEXT",
+                    "workflow_id": "workflow_id TEXT",
+                    "parent_goal_id": "parent_goal_id TEXT",
+                    "description": "description TEXT",
+                    "status": "status TEXT",
+                    "priority": "priority INTEGER",
+                    "created_at": "created_at REAL",
+                    "updated_at": "updated_at REAL",
+                    "completed_at": "completed_at REAL",
+                },
+            )
+
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_goals_workflow ON goals(workflow_id)"
+        )
+        _ensure_unique_ids(cur, "goals", "goal_id", ["id"], "goal")
+
+        # --- Actions table ---------------------------------------------------
+        if not _table_exists(cur, "actions"):
+            cur.execute(
+                """
+                CREATE TABLE actions (
+                    action_id TEXT PRIMARY KEY,
+                    workflow_id TEXT,
+                    parent_action_id TEXT,
+                    action_type TEXT,
+                    title TEXT,
+                    description TEXT,
+                    reasoning TEXT,
+                    tool_name TEXT,
+                    tool_args TEXT,
+                    tool_result TEXT,
+                    tool_data TEXT,
+                    status TEXT,
+                    created_at REAL,
+                    started_at REAL,
+                    completed_at REAL,
+                    updated_at REAL,
+                    sequence_number INTEGER,
+                    priority INTEGER,
+                    tags TEXT,
+                    result TEXT,
+                    error TEXT,
+                    metadata TEXT,
+                    FOREIGN KEY (workflow_id) REFERENCES workflows(workflow_id)
+                )
+                """
+            )
+        else:
+            _ensure_columns(
+                cur,
+                "actions",
+                {
+                    "action_id": "action_id TEXT",
+                    "workflow_id": "workflow_id TEXT",
+                    "parent_action_id": "parent_action_id TEXT",
+                    "title": "title TEXT",
+                    "description": "description TEXT",
+                    "reasoning": "reasoning TEXT",
+                    "tool_name": "tool_name TEXT",
+                    "tool_args": "tool_args TEXT",
+                    "tool_result": "tool_result TEXT",
+                    "tool_data": "tool_data TEXT",
+                    "status": "status TEXT",
+                    "created_at": "created_at REAL",
+                    "started_at": "started_at REAL",
+                    "completed_at": "completed_at REAL",
+                    "updated_at": "updated_at REAL",
+                    "sequence_number": "sequence_number INTEGER",
+                    "priority": "priority INTEGER",
+                    "tags": "tags TEXT",
+                    "result": "result TEXT",
+                    "error": "error TEXT",
+                    "metadata": "metadata TEXT",
+                },
+            )
+
+        _ensure_unique_ids(cur, "actions", "action_id", ["id"], "action")
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_actions_workflow ON actions(workflow_id)"
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_actions_status ON actions(status)"
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_actions_created ON actions(created_at)"
         )
 
-        # Artifacts registry (URIs, file paths, metadata)
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS artifacts (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                uri TEXT,
-                path TEXT,
-                kind TEXT,
-                size INTEGER,
-                checksum TEXT,
-                metadata TEXT,
-                created_at REAL
+        # --- Artifacts table -------------------------------------------------
+        if not _table_exists(cur, "artifacts"):
+            cur.execute(
+                """
+                CREATE TABLE artifacts (
+                    artifact_id TEXT PRIMARY KEY,
+                    workflow_id TEXT,
+                    action_id TEXT,
+                    artifact_type TEXT,
+                    name TEXT,
+                    description TEXT,
+                    path TEXT,
+                    content TEXT,
+                    metadata TEXT,
+                    tags TEXT,
+                    size INTEGER,
+                    checksum TEXT,
+                    created_at REAL,
+                    FOREIGN KEY (workflow_id) REFERENCES workflows(workflow_id),
+                    FOREIGN KEY (action_id) REFERENCES actions(action_id)
+                )
+                """
             )
-            """
+        else:
+            _ensure_columns(
+                cur,
+                "artifacts",
+                {
+                    "artifact_id": "artifact_id TEXT",
+                    "workflow_id": "workflow_id TEXT",
+                    "action_id": "action_id TEXT",
+                    "artifact_type": "artifact_type TEXT",
+                    "name": "name TEXT",
+                    "description": "description TEXT",
+                    "path": "path TEXT",
+                    "content": "content TEXT",
+                    "metadata": "metadata TEXT",
+                    "tags": "tags TEXT",
+                    "size": "size INTEGER",
+                    "checksum": "checksum TEXT",
+                    "created_at": "created_at REAL",
+                },
+            )
+
+        _ensure_unique_ids(cur, "artifacts", "artifact_id", ["id"], "artifact")
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_artifacts_workflow ON artifacts(workflow_id)"
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_artifacts_action ON artifacts(action_id)"
         )
 
-        # Cognitive timeline states used by explorer endpoints
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS cognitive_timeline_states (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                ts REAL,
-                kind TEXT,
-                label TEXT,
-                details TEXT
+        # --- Cognitive timeline states --------------------------------------
+        if not _table_exists(cur, "cognitive_timeline_states"):
+            cur.execute(
+                """
+                CREATE TABLE cognitive_timeline_states (
+                    state_id TEXT PRIMARY KEY,
+                    timestamp REAL,
+                    state_type TEXT,
+                    state_data TEXT,
+                    workflow_id TEXT,
+                    description TEXT,
+                    created_at REAL,
+                    FOREIGN KEY (workflow_id) REFERENCES workflows(workflow_id)
+                )
+                """
             )
-            """
-        )
+        else:
+            _ensure_columns(
+                cur,
+                "cognitive_timeline_states",
+                {
+                    "state_id": "state_id TEXT",
+                    "timestamp": "timestamp REAL",
+                    "state_type": "state_type TEXT",
+                    "state_data": "state_data TEXT",
+                    "workflow_id": "workflow_id TEXT",
+                    "description": "description TEXT",
+                    "created_at": "created_at REAL",
+                },
+            )
 
-        # Simple indexes to speed up common lookups
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_actions_memory ON actions(memory_id)")
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_memories_created ON memories(created_at)")
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_artifacts_created ON artifacts(created_at)")
+        existing_cts_columns = _existing_columns(cur, "cognitive_timeline_states")
+        # Populate newly added columns from legacy schema when available
+        if "ts" in existing_cts_columns:
+            cur.execute(
+                "UPDATE cognitive_timeline_states SET timestamp = COALESCE(timestamp, ts)"
+            )
+            cur.execute(
+                "UPDATE cognitive_timeline_states SET created_at = COALESCE(created_at, ts)"
+            )
+        if "kind" in existing_cts_columns:
+            cur.execute(
+                "UPDATE cognitive_timeline_states SET state_type = COALESCE(state_type, kind)"
+            )
+        if "details" in existing_cts_columns:
+            cur.execute(
+                "UPDATE cognitive_timeline_states SET state_data = COALESCE(state_data, details)"
+            )
+        if "label" in existing_cts_columns:
+            cur.execute(
+                "UPDATE cognitive_timeline_states SET description = COALESCE(description, label)"
+            )
+
+        _ensure_unique_ids(
+            cur,
+            "cognitive_timeline_states",
+            "state_id",
+            ["id"],
+            "state",
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_cts_timestamp ON cognitive_timeline_states(timestamp)"
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_cts_type ON cognitive_timeline_states(state_type)"
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_cts_workflow ON cognitive_timeline_states(workflow_id)"
+        )
 
         conn.commit()
     finally:

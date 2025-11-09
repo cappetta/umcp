@@ -16,6 +16,7 @@ from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Resp
 from .ums_models import *
 from .ums_services import *
 from .ums_database import get_db_connection, get_database_path
+from ultimate_mcp_server.working_memory_api import initialize_unified_memory_schema
 
 def setup_ums_api(app: FastAPI) -> None:
     """
@@ -50,6 +51,9 @@ def setup_ums_api(app: FastAPI) -> None:
     storage_dir = database_path.parent
     storage_dir.mkdir(parents=True, exist_ok=True)
     tools_dir = package_root / "tools"
+
+    # Ensure the core unified memory schema exists so HTTP endpoints don't fail
+    initialize_unified_memory_schema(str(database_path))
 
     # ---------- Helper functions ----------
     def _dict_depth(d: Dict[str, Any], depth: int = 0) -> int:
