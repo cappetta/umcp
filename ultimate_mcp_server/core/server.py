@@ -419,21 +419,26 @@ class Gateway:
         # ---------------------------------------------------------------------
 
         # --- Trigger Dynamic Docstring Generation ---
-        # This should run after config is loaded but before the server is fully ready
-        # It checks cache and potentially calls an LLM.
-        self.logger.info("Initiating dynamic docstring generation for Marqo tool...")
-        try:
-            # Import the function here to avoid circular imports
-            from ultimate_mcp_server.tools.marqo_fused_search import (
-                trigger_dynamic_docstring_generation,
-            )
+        # This can be noisy or require outbound LLM. Skip with UMS_SKIP_DOCSTRINGS=true
+        skip_docstrings = os.getenv("UMS_SKIP_DOCSTRINGS", "").lower() in ("1", "true", "yes")
+        if skip_docstrings:
+            self.logger.info("Skipping dynamic docstring generation (UMS_SKIP_DOCSTRINGS)")
+        else:
+            # This should run after config is loaded but before the server is fully ready
+            # It checks cache and potentially calls an LLM.
+            self.logger.info("Initiating dynamic docstring generation for Marqo tool...")
+            try:
+                # Import the function here to avoid circular imports
+                from ultimate_mcp_server.tools.marqo_fused_search import (
+                    trigger_dynamic_docstring_generation,
+                )
 
-            await trigger_dynamic_docstring_generation()
-            self.logger.info("Dynamic docstring generation/loading complete.")
-        except Exception as e:
-            self.logger.error(
-                f"Error during dynamic docstring generation startup task: {e}", exc_info=True
-            )
+                await trigger_dynamic_docstring_generation()
+                self.logger.info("Dynamic docstring generation/loading complete.")
+            except Exception as e:
+                self.logger.warning(
+                    f"Docstring generation failed; continuing without augmentation: {e}", exc_info=True
+                )
         # ---------------------------------------------
 
         # --- Set the global instance variable ---
@@ -460,12 +465,13 @@ class Gateway:
 
         try:
             # Import and call trigger_dynamic_docstring_generation again
-            from ultimate_mcp_server.tools.marqo_fused_search import (
-                trigger_dynamic_docstring_generation,
-            )
+            if not skip_docstrings:
+                from ultimate_mcp_server.tools.marqo_fused_search import (
+                    trigger_dynamic_docstring_generation,
+                )
 
-            await trigger_dynamic_docstring_generation()
-            logger.info("Dynamic docstring generation/loading complete.")
+                await trigger_dynamic_docstring_generation()
+                logger.info("Dynamic docstring generation/loading complete.")
             
             if is_sse_mode:
                 # For SSE mode, create a persistent context that doesn't shutdown easily
