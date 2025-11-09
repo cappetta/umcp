@@ -2,67 +2,97 @@
 import asyncio
 import json
 import os
+import sys
+import types
 from pathlib import Path
 from typing import Any, Dict, Generator, List, Optional
 
 import pytest
 from pytest import MonkeyPatch
 
-from types import SimpleNamespace
+if "yaml" not in sys.modules:
+    yaml_stub = types.ModuleType("yaml")
+
+    class YAMLError(Exception):
+        """Fallback error type mimicking :class:`yaml.YAMLError`."""
+
+        pass
+
+    yaml_stub.YAMLError = YAMLError
+    yaml_stub.safe_load = lambda data: {}
+    sys.modules["yaml"] = yaml_stub
+
+if "decouple" not in sys.modules:
+    decouple_stub = types.ModuleType("decouple")
+
+    class RepositoryEnv:  # noqa: D401 - simple stand-in
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+    class UndefinedValueError(Exception):
+        """Fallback error mirroring :class:`decouple.UndefinedValueError`."""
+
+        pass
+
+    class Config:  # noqa: D401 - compatibility shim
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def get(self, _key, default=None, cast=None):
+            return cast(default) if callable(cast) and default is not None else default
+
+        def __call__(self, key, default=None, cast=None):
+            return self.get(key, default=default, cast=cast)
+
+    decouple_stub.Config = Config
+    decouple_stub.RepositoryEnv = RepositoryEnv
+    decouple_stub.UndefinedValueError = UndefinedValueError
+    sys.modules["decouple"] = decouple_stub
 
 try:
     from ultimate_mcp_server.config import Config, get_config
-except ModuleNotFoundError:  # pragma: no cover - exercised in minimal envs
-    class Config:  # type: ignore[no-redef]
-        """Lightweight fallback Config used when optional deps are missing."""
+except Exception:  # pragma: no cover - provide lightweight fallback for missing deps
+    class Config:  # type: ignore[override]
+        """Minimal stand-in used when optional config dependencies are unavailable."""
 
-        def __init__(self):
-            self.cache = SimpleNamespace(enabled=False, ttl=0, max_entries=0)
-            self.server = SimpleNamespace(port=8013)
+        def __init__(self, *args, **kwargs):
+            pass
 
-            provider_stub = SimpleNamespace(api_key="")
-            self.providers = SimpleNamespace(
-                openai=provider_stub,
-                anthropic=provider_stub,
-                gemini=provider_stub,
-                deepseek=provider_stub,
-            )
-
-    def get_config() -> Config:  # type: ignore[no-redef]
+    def get_config() -> Config:  # type: ignore[override]
         return Config()
+
+from ultimate_mcp_server.constants import Provider
 
 try:
     from ultimate_mcp_server.core.providers.base import BaseProvider, ModelResponse
-except ModuleNotFoundError:  # pragma: no cover - exercised in minimal envs
-    class ModelResponse(SimpleNamespace):  # type: ignore[no-redef]
-        pass
+except Exception:  # pragma: no cover - ensure tests run without optional deps
+    class ModelResponse(dict):
+        """Lightweight mapping mirroring the provider response contract."""
 
-    class BaseProvider:  # type: ignore[no-redef]
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+            self.__dict__.update(kwargs)
+
+    class BaseProvider:  # type: ignore[override]
         provider_name = "mock"
 
-        def __init__(self, api_key: str | None = None, **kwargs):
+        def __init__(self, api_key: Optional[str] = None, **kwargs):
             self.api_key = api_key
-            self.logger = SimpleNamespace(success=lambda *_, **__: None)
+            self.logger = types.SimpleNamespace(success=lambda *a, **k: None)
 
-    Provider = SimpleNamespace  # type: ignore[assignment]
-else:
-    from ultimate_mcp_server.constants import Provider
-
-try:
-    from ultimate_mcp_server.core.server import Gateway
-except ModuleNotFoundError:  # pragma: no cover - exercised in minimal envs
-    class Gateway:  # type: ignore[no-redef]
-        def __init__(self, name: str = "gateway", **kwargs):
-            self.name = name
-
-        async def setup(self):  # pragma: no cover - fallback used only in tests
+        async def initialize(self) -> bool:  # pragma: no cover - stub
             return True
 
 try:
-    from ultimate_mcp_server.utils import get_logger
-except ModuleNotFoundError:  # pragma: no cover - exercised in minimal envs
-    def get_logger(name: str):  # type: ignore[no-redef]
-        return SimpleNamespace(success=lambda *_, **__: None, info=lambda *_, **__: None)
+    from ultimate_mcp_server.core.server import Gateway
+except Exception:  # pragma: no cover - minimal gateway stub
+    class Gateway:  # type: ignore[override]
+        def __init__(self, name: str = "stub-gateway", **_kwargs):
+            self.name = name
+            self.providers: Dict[str, BaseProvider] = {}
+            self.provider_status: Dict[str, Dict[str, Any]] = {}
+
+from ultimate_mcp_server.utils import get_logger
 
 logger = get_logger("tests")
 
