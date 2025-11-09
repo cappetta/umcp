@@ -12,11 +12,24 @@ from typing import Any, Dict, List, Optional
 from fastapi import Body, FastAPI, HTTPException, Query
 from fastapi import Path as ApiPath
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
+from pydantic import BaseModel
 
+from .story_seed import (
+    STORY_WORKFLOW_ID,
+    StoryAlreadyExistsError,
+    StoryNotFoundError,
+    get_workflow_story,
+    seed_unified_memory_story,
+)
 from .ums_models import *
 from .ums_services import *
-from .ums_database import get_db_connection, get_database_path
-from ultimate_mcp_server.working_memory_api import initialize_unified_memory_schema
+from .story_seed import initialize_unified_memory_schema
+from .ums_database import (
+    calculate_state_complexity,
+    compute_state_diff,
+    get_db_connection,
+    get_database_path,
+)
 
 def setup_ums_api(app: FastAPI) -> None:
     """
@@ -55,49 +68,6 @@ def setup_ums_api(app: FastAPI) -> None:
     # Ensure the core unified memory schema exists so HTTP endpoints don't fail
     initialize_unified_memory_schema(str(database_path))
 
-    # ---------- Helper functions ----------
-    def _dict_depth(d: Dict[str, Any], depth: int = 0) -> int:
-        if not isinstance(d, dict) or not d:
-            return depth
-        return max(_dict_depth(v, depth + 1) for v in d.values())
-
-    def _count_values(d: Dict[str, Any]) -> int:
-        cnt = 0
-        for v in d.values():
-            if isinstance(v, dict):
-                cnt += _count_values(v)
-            elif isinstance(v, list):
-                cnt += len(v)
-            else:
-                cnt += 1
-        return cnt
-
-    def calculate_state_complexity(state_data: Dict[str, Any]) -> float:
-        if not state_data:
-            return 0.0
-        comp = (
-            len(state_data) * 5 + _dict_depth(state_data) * 10 + _count_values(state_data) * 0.5
-        )
-        return round(min(100.0, comp), 2)
-
-    def compute_state_diff(a: Dict[str, Any], b: Dict[str, Any]) -> Dict[str, Any]:
-        diff = {"added": {}, "removed": {}, "modified": {}, "magnitude": 0.0}
-        keys = set(a) | set(b)
-        changed = 0
-        for k in keys:
-            if k not in a:
-                diff["added"][k] = b[k]
-                changed += 1
-            elif k not in b:
-                diff["removed"][k] = a[k]
-                changed += 1
-            elif a[k] != b[k]:
-                diff["modified"][k] = {"before": a[k], "after": b[k]}
-                changed += 1
-        if keys:
-            diff["magnitude"] = (changed / len(keys)) * 100
-        return diff
-
     # ---------- Pydantic models ----------
     class CognitiveState(BaseModel):
         state_id: str
@@ -120,30 +90,30 @@ def setup_ums_api(app: FastAPI) -> None:
         has_more: bool
 
     # ---------- Static assets ----------
-        # ---------- Root Discovery Endpoint ----------
-        
-        @app.get(
-            "/",
-            summary="MCP Server Discovery",
-            description="Returns information about the MCP server endpoint",
-            response_description="Server information including transport type and endpoint path",
-        )
-        async def root_endpoint():  # noqa: D401
-            """Root endpoint for MCP server discovery"""
-            response_data = {
-                    "type": "mcp-server",
-                    "version": "1.0.0",
-                    "transport": "http",
-                    "endpoint": "/mcp",
-                    "api_docs": "/api/docs",
-                    "api_spec": "/api/openapi.json",
-                }
-            headers = {
-                    "X-MCP-Server": "true",
-                    "X-MCP-Version": "1.0.0",
-                    "X-MCP-Transport": "http",
-                }
-            return JSONResponse(content=response_data, headers=headers)
+
+    @app.get(
+        "/",
+        summary="MCP Server Discovery",
+        description="Returns information about the MCP server endpoint",
+        response_description="Server information including transport type and endpoint path",
+    )
+    async def root_endpoint() -> JSONResponse:  # noqa: D401
+        """Root endpoint for MCP server discovery."""
+
+        response_data = {
+            "type": "mcp-server",
+            "version": "1.0.0",
+            "transport": "http",
+            "endpoint": "/mcp",
+            "api_docs": "/api/docs",
+            "api_spec": "/api/openapi.json",
+        }
+        headers = {
+            "X-MCP-Server": "true",
+            "X-MCP-Version": "1.0.0",
+            "X-MCP-Transport": "http",
+        }
+        return JSONResponse(content=response_data, headers=headers)
 
     @app.get("/tools/ums_explorer.html", include_in_schema=False)
     async def serve_ums_explorer():
@@ -165,6 +135,47 @@ def setup_ums_api(app: FastAPI) -> None:
     @app.get("/ums-explorer", include_in_schema=False)
     async def ums_explorer_redirect():
         return RedirectResponse(url="/api/tools/ums_explorer.html")
+
+    # ---------- Story seeding and retrieval ----------
+
+    @app.post(
+        "/stories/mission-cerberus",
+        summary="Seed the Mission Cerberus demo story",
+        tags=["Unified Memory Story"],
+    )
+    async def seed_mission_cerberus_story(
+        force: bool = Query(
+            False,
+            description="Force reseeding by clearing existing Mission Cerberus data",
+        )
+    ) -> Dict[str, Any]:
+        try:
+            result = seed_unified_memory_story(str(database_path), force=force)
+        except StoryAlreadyExistsError as exc:  # pragma: no cover - HTTP path
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return result.to_dict()
+
+    @app.get(
+        "/workflows/{workflow_id}/story",
+        summary="Retrieve aggregated story view for a workflow",
+        tags=["Unified Memory Story"],
+    )
+    async def get_workflow_story_view(workflow_id: str) -> Dict[str, Any]:
+        try:
+            return get_workflow_story(workflow_id, db_path=str(database_path))
+        except StoryNotFoundError as exc:  # pragma: no cover - HTTP path
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get(
+        "/stories/mission-cerberus",
+        summary="Convenience endpoint for Mission Cerberus story",
+        tags=["Unified Memory Story"],
+    )
+    async def get_mission_cerberus_story() -> Dict[str, Any]:
+        try:
+            return get_workflow_story(STORY_WORKFLOW_ID, db_path=str(database_path))
+        except StoryNotFoundError as exc:  # pragma: no cover - HTTP path
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     # ---------- Cognitive-states endpoint ----------
     @app.get(
@@ -239,60 +250,6 @@ def setup_ums_api(app: FastAPI) -> None:
             raise HTTPException(status_code=500, detail=f"Database error: {e}") from e
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Internal error: {e}") from e
-
-    # ---------- Timeline helper functions ----------
-    def generate_timeline_segments(
-        timeline_data: List[Dict[str, Any]], granularity: str, hours: int
-    ) -> List[Dict[str, Any]]:
-        """Generate timeline segments summarising state counts / complexity over time."""
-        if not timeline_data:
-            return []
-
-        start_ts = min(item["timestamp"] for item in timeline_data)
-        end_ts = max(item["timestamp"] for item in timeline_data)
-
-        seg_seconds = 1 if granularity == "second" else 60 if granularity == "minute" else 3600
-        segments: List[Dict[str, Any]] = []
-        current = start_ts
-        from collections import Counter
-
-        while current < end_ts:
-            seg_end = current + seg_seconds
-            seg_states = [it for it in timeline_data if current <= it["timestamp"] < seg_end]
-            if seg_states:
-                segments.append(
-                    {
-                        "start_time": current,
-                        "end_time": seg_end,
-                        "state_count": len(seg_states),
-                        "avg_complexity": sum(s["complexity_score"] for s in seg_states)
-                        / len(seg_states),
-                        "max_change_magnitude": max(s["change_magnitude"] for s in seg_states),
-                        "dominant_type": Counter(
-                            s["state_type"] for s in seg_states
-                        ).most_common(1)[0][0],
-                    }
-                )
-            current = seg_end
-        return segments
-
-    def calculate_timeline_stats(timeline_data: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """Return aggregate stats about timeline complexity / changes."""
-        if not timeline_data:
-            return {}
-        from collections import Counter
-
-        complexities = [it["complexity_score"] for it in timeline_data]
-        changes = [it["change_magnitude"] for it in timeline_data if it["change_magnitude"] > 0]
-        stypes = Counter(it["state_type"] for it in timeline_data)
-        return {
-            "avg_complexity": sum(complexities) / len(complexities),
-            "max_complexity": max(complexities),
-            "avg_change_magnitude": (sum(changes) / len(changes)) if changes else 0,
-            "max_change_magnitude": max(changes) if changes else 0,
-            "most_common_type": stypes.most_common(1)[0][0] if stypes else None,
-            "type_distribution": dict(stypes),
-        }
 
     # ---------- Timeline Pydantic models ----------
     class TimelineState(BaseModel):

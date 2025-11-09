@@ -4,7 +4,19 @@ This module provides the UMS (Unified Memory System) API endpoints and services
 for monitoring and managing cognitive states, actions, performance, and artifacts.
 """
 
-from .ums_endpoints import setup_ums_api
+from .story_seed import (
+    STORY_WORKFLOW_ID,
+    StoryAlreadyExistsError,
+    StoryNotFoundError,
+    get_workflow_story,
+    seed_unified_memory_story,
+)
+
+try:
+    from .ums_endpoints import setup_ums_api
+except ModuleNotFoundError:  # pragma: no cover - exercised in minimal envs
+    def setup_ums_api(*_, **__):  # type: ignore[no-redef]
+        raise RuntimeError("FastAPI is required to set up UMS API endpoints")
 
 # Import database utilities
 from .ums_database import (
@@ -36,14 +48,25 @@ from .ums_database import (
     detect_cognitive_anomalies,
 )
 
-# Import all models for easy access
-from .ums_models import *
+# Import all models for easy access when dependencies are installed
+try:  # pragma: no cover - exercised in minimal envs
+    from .ums_models import *  # type: ignore[misc]
+except ModuleNotFoundError:
+    pass
 
 # Import all services
-from .ums_services import *
+try:  # pragma: no cover - exercised in minimal envs
+    from .ums_services import *  # type: ignore[misc]
+except ModuleNotFoundError:
+    pass
 
 __all__ = [
     "setup_ums_api",
+    "STORY_WORKFLOW_ID",
+    "StoryAlreadyExistsError",
+    "StoryNotFoundError",
+    "get_workflow_story",
+    "seed_unified_memory_story",
     # Database utilities
     "get_database_path",
     "get_db_connection", 
