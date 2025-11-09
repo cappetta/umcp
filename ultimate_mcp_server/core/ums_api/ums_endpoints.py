@@ -13,6 +13,7 @@ from fastapi import Body, FastAPI, HTTPException, Query
 from fastapi import Path as ApiPath
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
 
+from .story_data import STORY_WORKFLOW_ID, fetch_story_snapshot, stage_sample_story
 from .ums_models import *
 from .ums_services import *
 from .ums_database import get_db_connection, get_database_path
@@ -5139,6 +5140,32 @@ def setup_ums_api(app: FastAPI) -> None:
         message: str = Field(..., description="Success or error message")
         restore_data: RestoreData = Field(..., description="Details of the restoration")
 
+    # ---------- Story Seeding Models ----------
+
+    class StorySeedResponse(BaseModel):
+        """Response model for story seeding"""
+
+        workflow_id: str = Field(..., description="Workflow identifier for the staged story")
+        counts: Dict[str, int] = Field(..., description="Number of rows inserted per table")
+        message: str = Field(..., description="Human readable status message")
+        reseeded: bool = Field(False, description="Whether the story was reseeded")
+
+    class StorySnapshotResponse(BaseModel):
+        """Response model for retrieving the staged story"""
+
+        workflow: Dict[str, Any] = Field(..., description="Workflow metadata for the story")
+        goals: List[Dict[str, Any]] = Field(..., description="Goals associated with the story workflow")
+        actions: List[Dict[str, Any]] = Field(..., description="Actions recorded for the workflow")
+        artifacts: List[Dict[str, Any]] = Field(..., description="Artifacts produced by the workflow")
+        artifact_relationships: List[Dict[str, Any]] = Field(
+            ..., description="Relationships between story artifacts"
+        )
+        memories: List[Dict[str, Any]] = Field(..., description="Memories linked to the workflow")
+        memory_links: List[Dict[str, Any]] = Field(..., description="Graph links connecting memories")
+        cognitive_timeline_states: List[Dict[str, Any]] = Field(
+            ..., description="Cognitive timeline states captured for the workflow"
+        )
+
     # ---------- Health Check Models ----------
 
     class HealthResponse(BaseModel):
@@ -5412,6 +5439,145 @@ def setup_ums_api(app: FastAPI) -> None:
             raise HTTPException(status_code=500, detail=f"Database error: {str(e)}") from e
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Failed to download artifact: {str(e)}") from e
+
+    # ---------- Story Endpoints ----------
+
+    @app.post(
+        "/story/seed",
+        response_model=StorySeedResponse,
+        tags=["Story"],
+        summary="Seed the demo unified memory story",
+        description="""
+    Populate the unified agent memory database with a cohesive Mars habitat
+    rescue narrative.  The staged story touches workflows, goals, actions,
+    artifacts, artifact relationships, cognitive timeline states, and linked
+    memories so explorers and dashboards have rich data to visualise.
+
+    Use the `force` flag to refresh the story with new timestamps when needed.
+        """,
+        responses={
+            200: {
+                "description": "Story seeded successfully",
+                "content": {
+                    "application/json": {
+                        "example": {
+                            "workflow_id": STORY_WORKFLOW_ID,
+                            "counts": {
+                                "workflows": 1,
+                                "goals": 3,
+                                "actions": 3,
+                                "artifacts": 3,
+                                "artifact_relationships": 2,
+                                "memories": 3,
+                                "memory_links": 2,
+                                "cognitive_timeline_states": 3,
+                            },
+                            "message": "Story seeded successfully",
+                            "reseeded": False,
+                        }
+                    }
+                },
+            },
+            500: {"description": "Database error while seeding story"},
+        },
+    )
+    async def seed_story(
+        force: bool = Query(False, description="Reseed the story even if it exists")
+    ) -> StorySeedResponse:
+        """Seed the example unified memory story."""
+
+        def _counts_from_snapshot(snapshot: Dict[str, Any]) -> Dict[str, int]:
+            return {
+                "workflows": 1 if snapshot else 0,
+                "goals": len(snapshot.get("goals", [])),
+                "actions": len(snapshot.get("actions", [])),
+                "artifacts": len(snapshot.get("artifacts", [])),
+                "artifact_relationships": len(snapshot.get("artifact_relationships", [])),
+                "memories": len(snapshot.get("memories", [])),
+                "memory_links": len(snapshot.get("memory_links", [])),
+                "cognitive_timeline_states": len(snapshot.get("cognitive_timeline_states", [])),
+            }
+
+        try:
+            existing_snapshot = fetch_story_snapshot()
+        except sqlite3.Error as exc:  # pragma: no cover - defensive
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to inspect existing story data: {exc}",
+            ) from exc
+
+        if existing_snapshot and not force:
+            return StorySeedResponse(
+                workflow_id=existing_snapshot["workflow"]["workflow_id"],
+                counts=_counts_from_snapshot(existing_snapshot),
+                message="Story already staged",
+                reseeded=False,
+            )
+
+        try:
+            result = stage_sample_story()
+        except sqlite3.Error as exc:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to seed story data: {exc}",
+            ) from exc
+
+        counts = result["counts"]
+        return StorySeedResponse(
+            workflow_id=result["workflow"]["workflow_id"],
+            counts=counts,
+            message="Story seeded successfully" if not force else "Story reseeded successfully",
+            reseeded=force,
+        )
+
+    @app.get(
+        "/story/summary",
+        response_model=StorySnapshotResponse,
+        tags=["Story"],
+        summary="Fetch the staged unified memory story",
+        description="""
+    Retrieve the currently staged Mars habitat rescue narrative including
+    workflow context, nested goals, detailed actions, produced artifacts,
+    artifact relationships, memories, memory graph links, and cognitive
+    timeline states.
+        """,
+        responses={
+            200: {
+                "description": "Story snapshot retrieved",
+                "content": {
+                    "application/json": {
+                        "example": {
+                            "workflow": {"workflow_id": STORY_WORKFLOW_ID},
+                            "goals": [{"goal_id": "goal_restore_habitat"}],
+                            "actions": [{"action_id": "action_survey_damage"}],
+                            "artifacts": [{"artifact_id": "artifact_mission_brief"}],
+                            "artifact_relationships": [{"relation_type": "derives_from"}],
+                            "memories": [{"memory_id": "memory_surface_conditions"}],
+                            "memory_links": [{"link_id": "link_weather_to_power"}],
+                            "cognitive_timeline_states": [{"state_id": "state_initial_alert"}],
+                        }
+                    }
+                },
+            },
+            404: {"description": "Story has not been seeded"},
+            500: {"description": "Database error while fetching story"},
+        },
+    )
+    async def get_story_summary() -> StorySnapshotResponse:
+        """Return the staged story snapshot."""
+
+        try:
+            snapshot = fetch_story_snapshot()
+        except sqlite3.Error as exc:  # pragma: no cover - defensive
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to fetch story data: {exc}",
+            ) from exc
+
+        if not snapshot:
+            raise HTTPException(status_code=404, detail="Story data has not been seeded.")
+
+        return StorySnapshotResponse(**snapshot)
 
     # ---------- Health & Utilities Endpoints ----------
 
