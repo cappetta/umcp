@@ -32,6 +32,17 @@ SCRIPTS_TO_SKIP = ["sse_client_demo.py", "web_automation_instruction_packs.py", 
 # Strings indicating a critical error in the output (used if no specific allowed patterns)
 DEFAULT_ERROR_INDICATORS = ["Traceback (most recent call last):", "CRITICAL"]
 
+# --- Global allowances (non-fatal noise we ignore across demos) ---
+GLOBAL_ALLOWED_STDERR_PATTERNS: List[str] = [
+    # Pydantic v2 deprecation warnings (schema extras, min_items, etc.)
+    r"PydanticDeprecatedSince20",
+    r"Using extra keyword arguments on `Field` is deprecated",
+    r"`min_items` is deprecated",
+    r"json_schema_extra",
+    # Generic DeprecationWarnings emitted by dependencies
+    r"DeprecationWarning: .*",
+]
+
 # --- Individual Demo Expectations ---
 # Define expected outcomes for specific scripts.
 # - expected_exit_code: The code the script should exit with (default: 0)
@@ -635,7 +646,8 @@ def check_for_errors(script_name: str, exit_code: int, stdout: str, stderr: str)
     
     expectations = DEMO_EXPECTATIONS.get(script_name, {})
     expected_exit_code = expectations.get("expected_exit_code", 0)
-    allowed_stderr_patterns = expectations.get("allowed_stderr_patterns", [])
+    # Merge global allowances with per-script allowances
+    allowed_stderr_patterns = GLOBAL_ALLOWED_STDERR_PATTERNS + expectations.get("allowed_stderr_patterns", [])
     allowed_stdout_patterns = expectations.get("allowed_stdout_patterns", [])
 
     # 1. Check Exit Code

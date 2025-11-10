@@ -194,7 +194,6 @@ sec_filings.db-shm
 sec_filings.db-wal
 minified_code.js
 regenerate_markdown_progress.json.bak
-storage/tournaments/
 cache/cache.pkl
 cache/disk_cache/cache.db
 marqo_index_config.json
@@ -228,10 +227,6 @@ examples/demo.db
 downloaded_files/
 examples/sample/backprop_paper.md
 examples/sample/downloaded/
-storage/sb_demo_outputs/
-storage/smart_browser_scratch/autopilot_demo/
-storage/smart_browser_internal/*.db
-storage/smart_browser_internal/locator_cache.db
 unified_agent_memory.db
 advanced_demo_memory.db
 output.txt
@@ -240,8 +235,4 @@ debug_mod_tree_with_ids.xml
 debug_orig_tree_with_ids.xml
 redline.css
 tailwind.config.js
-storage/single_shot_synthesis
-storage/unified_agent_memory.db-journal
-storage/exercise_mental_health_quiz.html
-storage/exercise_mental_health_report.md
-storage/unified_agent_memory.dbOLD
+storage/*

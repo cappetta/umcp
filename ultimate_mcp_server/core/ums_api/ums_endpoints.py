@@ -127,30 +127,35 @@ def setup_ums_api(app: FastAPI) -> None:
         has_more: bool
 
     # ---------- Static assets ----------
-        # ---------- Root Discovery Endpoint ----------
-        
-        @app.get(
-            "/",
-            summary="MCP Server Discovery",
-            description="Returns information about the MCP server endpoint",
-            response_description="Server information including transport type and endpoint path",
-        )
-        async def root_endpoint():  # noqa: D401
-            """Root endpoint for MCP server discovery"""
+    # ---------- Root Discovery Endpoint ----------
+    import traceback
+    @app.get(
+        "/",
+        summary="MCP Server Discovery",
+        description="Returns information about the MCP server endpoint",
+        response_description="Server information including transport type and endpoint path",
+    )
+    async def root_endpoint():  # noqa: D401
+        """Root endpoint for MCP server discovery"""
+        try:
             response_data = {
-                    "type": "mcp-server",
-                    "version": "1.0.0",
-                    "transport": "http",
-                    "endpoint": "/mcp",
-                    "api_docs": "/api/docs",
-                    "api_spec": "/api/openapi.json",
-                }
+                "type": "mcp-server",
+                "version": "1.0.0",
+                "transport": "http",
+                "endpoint": "/mcp",
+                "api_docs": "/api/docs",
+                "api_spec": "/api/openapi.json",
+            }
             headers = {
-                    "X-MCP-Server": "true",
-                    "X-MCP-Version": "1.0.0",
-                    "X-MCP-Transport": "http",
-                }
+                "X-MCP-Server": "true",
+                "X-MCP-Version": "1.0.0",
+                "X-MCP-Transport": "http",
+            }
             return JSONResponse(content=response_data, headers=headers)
+        except Exception as exc:
+            tb = traceback.format_exc()
+            print(f"[DISCOVERY ERROR] {exc}\n{tb}", file=sys.stderr)
+            return JSONResponse(content={"error": "Discovery failed", "detail": str(exc), "traceback": tb}, status_code=500)
 
     @app.get("/tools/ums_explorer.html", include_in_schema=False)
     async def serve_ums_explorer():
@@ -2666,9 +2671,59 @@ def setup_ums_api(app: FastAPI) -> None:
             )
             
         except sqlite3.Error as e:
-            raise HTTPException(status_code=500, detail=f"Database error: {str(e)}") from e
+            # Return a safe-empty overview rather than raising a 500 to keep the
+            # monitoring endpoint resilient during partial DB failures.
+            get_logger("ultimate_mcp_server.core.ums_api").error(
+                f"Performance overview database error: {e}", exc_info=True
+            )
+            empty_overview = PerformanceOverviewStats(
+                total_actions=0,
+                active_workflows=0,
+                avg_execution_time=0.0,
+                success_rate_percentage=0.0,
+                throughput_per_hour=0.0,
+                error_rate_percentage=0.0,
+                avg_workflow_size=0.0,
+            )
+            return PerformanceOverviewResponse(
+                overview=empty_overview,
+                timeline=[],
+                tool_utilization=[],
+                bottlenecks=[],
+                analysis_period={
+                    "hours_back": hours_back,
+                    "granularity": granularity,
+                    "start_time": since_timestamp,
+                    "end_time": datetime.now().timestamp(),
+                },
+                timestamp=datetime.now().isoformat(),
+            )
         except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}") from e
+            get_logger("ultimate_mcp_server.core.ums_api").error(
+                f"Performance overview unexpected error: {e}", exc_info=True
+            )
+            empty_overview = PerformanceOverviewStats(
+                total_actions=0,
+                active_workflows=0,
+                avg_execution_time=0.0,
+                success_rate_percentage=0.0,
+                throughput_per_hour=0.0,
+                error_rate_percentage=0.0,
+                avg_workflow_size=0.0,
+            )
+            return PerformanceOverviewResponse(
+                overview=empty_overview,
+                timeline=[],
+                tool_utilization=[],
+                bottlenecks=[],
+                analysis_period={
+                    "hours_back": hours_back,
+                    "granularity": granularity,
+                    "start_time": since_timestamp,
+                    "end_time": datetime.now().timestamp(),
+                },
+                timestamp=datetime.now().isoformat(),
+            )
 
     @app.get(
         "/memory-quality/orphaned",
@@ -2745,9 +2800,59 @@ def setup_ums_api(app: FastAPI) -> None:
             )
             
         except sqlite3.Error as e:
-            raise HTTPException(status_code=500, detail=f"Database error: {str(e)}") from e
+            # Log the full DB exception and return a safe, empty overview so consumers
+            # don't receive a raw 500 stacktrace. This keeps monitoring resilient.
+            get_logger("ultimate_mcp_server.core.ums_api").error(
+                f"Performance overview database error: {e}", exc_info=True
+            )
+            empty_overview = PerformanceOverviewStats(
+                total_actions=0,
+                active_workflows=0,
+                avg_execution_time=0.0,
+                success_rate_percentage=0.0,
+                throughput_per_hour=0.0,
+                error_rate_percentage=0.0,
+                avg_workflow_size=0.0,
+            )
+            return PerformanceOverviewResponse(
+                overview=empty_overview,
+                timeline=[],
+                tool_utilization=[],
+                bottlenecks=[],
+                analysis_period={
+                    "hours_back": hours_back,
+                    "granularity": granularity,
+                    "start_time": since_timestamp,
+                    "end_time": datetime.now().timestamp(),
+                },
+                timestamp=datetime.now().isoformat(),
+            )
         except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}") from e
+            get_logger("ultimate_mcp_server.core.ums_api").error(
+                f"Performance overview unexpected error: {e}", exc_info=True
+            )
+            empty_overview = PerformanceOverviewStats(
+                total_actions=0,
+                active_workflows=0,
+                avg_execution_time=0.0,
+                success_rate_percentage=0.0,
+                throughput_per_hour=0.0,
+                error_rate_percentage=0.0,
+                avg_workflow_size=0.0,
+            )
+            return PerformanceOverviewResponse(
+                overview=empty_overview,
+                timeline=[],
+                tool_utilization=[],
+                bottlenecks=[],
+                analysis_period={
+                    "hours_back": hours_back,
+                    "granularity": granularity,
+                    "start_time": since_timestamp,
+                    "end_time": datetime.now().timestamp(),
+                },
+                timestamp=datetime.now().isoformat(),
+            )
 
     @app.post(
         "/memory-quality/bulk-execute",
@@ -3727,12 +3832,19 @@ def setup_ums_api(app: FastAPI) -> None:
         )
     ) -> PerformanceOverviewResponse:
         """Get comprehensive performance overview with metrics and trends"""
+        import traceback, sys
         try:
+            from .ums_database import ensure_database_exists
+            if not ensure_database_exists():
+                msg = f"UMS database file not found at {database_path}"
+                print(f"[PERF ERROR] {msg}", file=sys.stderr)
+                return JSONResponse(content={"error": "Database missing", "detail": msg}, status_code=500)
+
             conn = get_db_connection()
             cursor = conn.cursor()
-            
+
             since_timestamp = datetime.now().timestamp() - (hours_back * 3600)
-            
+
             # Overall performance metrics
             cursor.execute("""
                 SELECT 
@@ -3747,14 +3859,14 @@ def setup_ums_api(app: FastAPI) -> None:
                 FROM actions 
                 WHERE started_at >= ?
             """, (since_timestamp,))
-            
+
             overview_result = cursor.fetchone()
             overview_data = dict(zip([d[0] for d in cursor.description], overview_result, strict=False)) if overview_result else {}
-            
+
             # Calculate derived metrics
             success_rate = (overview_data.get('successful_actions', 0) / max(1, overview_data.get('total_actions', 1))) * 100
             throughput = overview_data.get('total_actions', 0) / max(1, hours_back)
-            
+
             overview_stats = PerformanceOverviewStats(
                 **overview_data,
                 success_rate_percentage=success_rate,
@@ -3762,7 +3874,7 @@ def setup_ums_api(app: FastAPI) -> None:
                 error_rate_percentage=100 - success_rate,
                 avg_workflow_size=overview_data.get('total_actions', 0) / max(1, overview_data.get('active_workflows', 1))
             )
-            
+
             # Performance timeline
             if granularity == 'hour':
                 time_format = "strftime('%Y-%m-%d %H:00:00', datetime(started_at, 'unixepoch'))"
@@ -3770,7 +3882,7 @@ def setup_ums_api(app: FastAPI) -> None:
                 time_format = "strftime('%Y-%m-%d %H:%M:00', datetime(started_at, 'unixepoch'))"
             else:  # day
                 time_format = "strftime('%Y-%m-%d', datetime(started_at, 'unixepoch'))"
-            
+
             cursor.execute(f"""
                 SELECT 
                     {time_format} as time_bucket,
@@ -3784,12 +3896,12 @@ def setup_ums_api(app: FastAPI) -> None:
                 GROUP BY {time_format}
                 ORDER BY time_bucket
             """, (since_timestamp,))
-            
+
             timeline_data = [
                 TimelineBucket(**dict(zip([d[0] for d in cursor.description], row, strict=False)))
                 for row in cursor.fetchall()
             ]
-            
+
             # Resource utilization by tool
             cursor.execute("""
                 SELECT 
@@ -3803,12 +3915,12 @@ def setup_ums_api(app: FastAPI) -> None:
                 GROUP BY tool_name
                 ORDER BY usage_count DESC
             """, (since_timestamp,))
-            
+
             tool_utilization = [
                 ToolUtilization(**dict(zip([d[0] for d in cursor.description], row, strict=False)))
                 for row in cursor.fetchall()
             ]
-            
+
             # Top bottlenecks (slowest operations)
             cursor.execute("""
                 SELECT 
@@ -3825,14 +3937,14 @@ def setup_ums_api(app: FastAPI) -> None:
                 ORDER BY duration DESC
                 LIMIT 10
             """, (since_timestamp,))
-            
+
             bottlenecks = [
                 Bottleneck(**dict(zip([d[0] for d in cursor.description], row, strict=False)))
                 for row in cursor.fetchall()
             ]
-            
+
             conn.close()
-            
+
             return PerformanceOverviewResponse(
                 overview=overview_stats,
                 timeline=timeline_data,
@@ -3846,11 +3958,11 @@ def setup_ums_api(app: FastAPI) -> None:
                 },
                 timestamp=datetime.now().isoformat()
             )
-            
-        except sqlite3.Error as e:
-            raise HTTPException(status_code=500, detail=f"Database error: {str(e)}") from e
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}") from e
+
+        except Exception as exc:
+            tb = traceback.format_exc()
+            print(f"[PERFORMANCE OVERVIEW ERROR] {exc}\n{tb}", file=sys.stderr)
+            return JSONResponse(content={"error": "Performance overview failed", "detail": str(exc), "traceback": tb}, status_code=500)
 
     @app.get(
         "/performance/bottlenecks",

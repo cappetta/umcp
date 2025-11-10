@@ -927,6 +927,10 @@ first and be prepared to adapt to available providers.
             # Python sandbox class methods
             "execute_python",
             "repl_python",
+            # Unified Memory System (UMS) - include core memory tools in base set
+            "store_memory",
+            "save_cognitive_state",
+            "get_memory_by_id",
         ]
 
         # Conditionally register tools based on load_all flag
@@ -2385,8 +2389,33 @@ def start_server(
 
         # --- UMS Explorer Placeholder ---
         # 2) Combined application – avoid overlapping mounts and trailing-slash redirects
+        # Add a lightweight discovery route at / so health checks and tests
+        # can easily discover the MCP endpoint and the REST API locations.
+        async def _discovery(scope, receive, send):
+            # ASGI-compatible tiny endpoint that returns discovery JSON
+            from starlette.responses import JSONResponse
+            try:
+                payload = {
+                    "type": "mcp-server",
+                    "version": "1.0.0",
+                    "transport": "http",
+                    "endpoint": endpoint_path,
+                    "api_docs": "/api/docs",
+                    "api_spec": "/api/openapi.json",
+                }
+                response = JSONResponse(content=payload)
+                await response(scope, receive, send)
+            except Exception as exc:  # defensive: log traceback and return a helpful error JSON
+                get_logger("ultimate_mcp_server.core.server").error(
+                    f"Discovery endpoint failed: {exc}", exc_info=True
+                )
+                err = JSONResponse(content={"error": "Discovery failed", "detail": str(exc)}, status_code=500)
+                await err(scope, receive, send)
+
         final_app = Starlette(
             routes=[
+                # Root discovery route
+                Route("/", endpoint=_discovery, methods=["GET"]),
                 # MCP endpoint mounted once at both variants, underlying app expects root
                 Mount(endpoint_path, mcp_app),           # /mcp or /sse
                 Mount(f"{endpoint_path}/", mcp_app),    # /mcp/ or /sse/
