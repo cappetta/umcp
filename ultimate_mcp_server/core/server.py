@@ -928,6 +928,7 @@ first and be prepared to adapt to available providers.
             "execute_python",
             "repl_python",
             # Unified Memory System (UMS) - include core memory tools in base set
+            "create_workflow",
             "store_memory",
             "save_cognitive_state",
             "get_memory_by_id",
