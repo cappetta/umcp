@@ -549,13 +549,6 @@ SCHEMA_STATEMENTS = [
         FOREIGN KEY (memory_id) REFERENCES memories(memory_id) ON DELETE SET NULL,
         FOREIGN KEY (action_id) REFERENCES actions(action_id) ON DELETE SET NULL
     );""",
-    "CREATE INDEX IF NOT EXISTS idx_workflows_idempotency_key ON workflows(idempotency_key);",  # NEW
-    "CREATE INDEX IF NOT EXISTS idx_actions_idempotency ON actions(workflow_id, idempotency_key);",  # NEW
-    "CREATE INDEX IF NOT EXISTS idx_artifacts_idempotency ON artifacts(workflow_id, idempotency_key);",  # NEW
-    "CREATE INDEX IF NOT EXISTS idx_memories_idempotency ON memories(workflow_id, idempotency_key);",  # NEW
-    "CREATE INDEX IF NOT EXISTS idx_goals_idempotency ON goals(workflow_id, idempotency_key);",  # NEW
-    "CREATE INDEX IF NOT EXISTS idx_thought_chains_idempotency ON thought_chains(workflow_id, idempotency_key);",  # NEW
-    "CREATE INDEX IF NOT EXISTS idx_thoughts_idempotency ON thoughts(thought_chain_id, idempotency_key);",  # NEW
     "CREATE INDEX IF NOT EXISTS idx_workflows_status ON workflows(status);",
     "CREATE INDEX IF NOT EXISTS idx_workflows_parent ON workflows(parent_workflow_id);",
     "CREATE INDEX IF NOT EXISTS idx_workflows_last_active ON workflows(last_active DESC);",
@@ -715,10 +708,39 @@ async def _ensure_idempotency_columns(conn: aiosqlite.Connection) -> None:
         return False
 
     for table, column, alter_sql, index_sqls in _IDEMPOTENCY_BACKFILL:
-        if not await _column_exists(table, column):
-            await conn.execute(alter_sql)
+        column_present = await _column_exists(table, column)
+        if not column_present:
+            try:
+                await conn.execute(alter_sql)
+            except sqlite3.OperationalError as exc:  # pragma: no cover - defensive logging
+                logger.error(
+                    "Failed to add %s.%s column during idempotency backfill: %s",
+                    table,
+                    column,
+                    exc,
+                )
+                raise
+            else:
+                column_present = await _column_exists(table, column)
+
+        if not column_present:
+            raise ToolError(
+                f"Failed to ensure idempotency column '{column}' exists on table '{table}'."
+            )
+
         for sql in index_sqls:
-            await conn.execute(sql)
+            try:
+                await conn.execute(sql)
+            except sqlite3.OperationalError as exc:
+                if "no such column" in str(exc).lower():
+                    logger.warning(
+                        "Skipping index creation for %s because column %s is unavailable: %s",
+                        table,
+                        column,
+                        exc,
+                    )
+                    continue
+                raise
 
 
 def _fmt_id(val: Any, length: int = 8) -> str:
@@ -1121,8 +1143,10 @@ class DBConnection:
                 await conn.execute("BEGIN IMMEDIATE;")
                 for stmt in SCHEMA_STATEMENTS:
                     await conn.execute(stmt)
-                await _ensure_idempotency_columns(conn)
                 await conn.commit()
+                await _ensure_idempotency_columns(conn)
+                if conn.in_transaction:
+                    await conn.commit()
                 self._schema_ready.add(self.db_path)
             except Exception as e:
                 if conn and conn.in_transaction:
