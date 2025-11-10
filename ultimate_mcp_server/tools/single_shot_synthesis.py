@@ -137,7 +137,7 @@ async def single_shot_synthesis(
             - temperature (float, optional): Model-specific temperature.
             - max_tokens (int, optional): Model-specific max tokens.
         synthesizer_model: Configuration for the "synthesizer" model. Dict fields:
-            - model_id (str, required, default 'anthropic/claude-3-7-sonnet-20250219'): e.g., 'google/gemini-1.5-pro-latest'.
+            - model_id (str, required, default 'anthropic/claude-sonnet-4-5-20250929'): e.g., 'google/gemini-1.5-pro-latest'.
             - temperature (float, optional): Synthesizer-specific temperature.
             - max_tokens (int, optional): Synthesizer-specific max tokens.
             - system_prompt (str, optional): System prompt for the synthesizer.

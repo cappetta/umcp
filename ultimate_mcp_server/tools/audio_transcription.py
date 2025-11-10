@@ -2477,7 +2477,7 @@ If the answer is not in the transcript, say so clearly."""
             if default_models and len(default_models) > 0:
                 model = default_models[0].get("id")
             else:
-                model = "claude-3-7-sonnet-20250219" if provider == Provider.ANTHROPIC.value else None
+                model = "claude-sonnet-4-5-20250929" if provider == Provider.ANTHROPIC.value else None
         
         logger.info(f"Using model: {provider}/{model}", emoji_key="model")
     except Exception as e:

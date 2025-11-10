@@ -388,7 +388,7 @@ async def recommend_model(
         "anthropic/claude-3-sonnet-20240229": ["reasoning", "coding", "knowledge", "instruction-following", "math", "multimodal"], # Previous Sonnet version
         "anthropic/claude-3-5-haiku-20241022": ["knowledge", "instruction-following", "multimodal"], # Based on 3.5 Haiku column
         "anthropic/claude-3-5-sonnet-20241022": ["reasoning", "coding", "knowledge", "instruction-following", "math", "multimodal"], # Based on 3.5 Sonnet column
-        "anthropic/claude-3-7-sonnet-20250219": ["reasoning", "coding", "knowledge", "instruction-following", "math", "multimodal"], # Based on 3.7 Sonnet column
+        "anthropic/claude-sonnet-4-5-20250929": ["reasoning", "coding", "knowledge", "instruction-following", "math", "multimodal"], # Based on Sonnet 4.5 guidance
 
         # DeepSeek models
         "deepseek/deepseek-chat": ["coding", "knowledge", "instruction-following"],
@@ -427,7 +427,7 @@ async def recommend_model(
         "anthropic/claude-3-sonnet-20240229": 8,
         "anthropic/claude-3-5-haiku-20241022": 7,
         "anthropic/claude-3-5-sonnet-20241022": 9,
-        "anthropic/claude-3-7-sonnet-20250219": 10,
+        "anthropic/claude-sonnet-4-5-20250929": 10,
 
         "deepseek/deepseek-chat": 7,
         "deepseek/deepseek-reasoner": 8,

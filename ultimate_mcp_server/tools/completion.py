@@ -457,7 +457,7 @@ async def chat_completion(
                   Each dictionary must have "role" ("user", "assistant", or "system") and "content" (string).
                   Example: `[{"role": "user", "content": "Hello!"}, {"role": "assistant", "content": "Hi there!"}]`
         provider: The name of the LLM provider (e.g., "openai", "anthropic", "gemini"). Defaults to "openai".
-        model: The specific model ID (e.g., "openai/gpt-4o", "anthropic/claude-3-7-sonnet-20250219").
+        model: The specific model ID (e.g., "openai/gpt-4o", "anthropic/claude-sonnet-4-5-20250929").
                If None, the provider's default model is used. Use `list_models` to find available IDs.
         max_tokens: (Optional) Maximum number of tokens for the *assistant's* response.
         temperature: (Optional) Controls response randomness (0.0=deterministic, 1.0=creative). Default 0.7.

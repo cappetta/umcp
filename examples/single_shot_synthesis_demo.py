@@ -55,13 +55,13 @@ DEFAULT_EXPERT_MODEL_CONFIGS_SSS: List[Dict[str, Any]] = [  # SSS suffix for Sin
 ]
 
 DEFAULT_SYNTHESIZER_MODEL_CONFIG_SSS: Dict[str, Any] = {
-    "model_id": "anthropic/claude-3-7-sonnet-20250219",
+    "model_id": "anthropic/claude-sonnet-4-5-20250929",
     "temperature": 0.5,
     "max_tokens": 3000,  # Allow more tokens for comprehensive synthesis
 }
 # Fallback if preferred synthesizer isn't available
 FALLBACK_SYNTHESIZER_MODEL_CONFIG_SSS: Dict[str, Any] = {
-    "model_id": "anthropic/claude-3-7-sonnet-20250219", # Fallback to Sonnet 3.5
+    "model_id": "anthropic/claude-sonnet-4-5-20250929", # Fallback to Sonnet 3.5
     "temperature": 0.5,
     "max_tokens": 3000,
 }
