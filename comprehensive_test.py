@@ -400,7 +400,7 @@ async def test_memory_system():
                 stored_memory_id = None
                 try:
                     store_params = {
-                        "memory_type": "test",
+                        "memory_type": "text",
                         "content": "This is a test memory for the test client",
                         "importance": 7.5,
                         "tags": ["test", "client"],

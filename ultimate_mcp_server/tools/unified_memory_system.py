@@ -743,6 +743,59 @@ async def _ensure_idempotency_columns(conn: aiosqlite.Connection) -> None:
                 raise
 
 
+async def _ensure_legacy_columns(conn: aiosqlite.Connection) -> None:
+    """Ensure columns introduced in newer schema versions exist on older DBs.
+
+    This helper attempts to ALTER TABLE ADD COLUMN for a small set of known
+    columns that may be missing on older databases. It is intentionally
+    conservative: only a short, explicit list of columns is added.
+    """
+
+    async def _column_exists(table: str, column: str) -> bool:
+        async with conn.execute(f"PRAGMA table_info({table})") as cursor:
+            rows = await cursor.fetchall()
+        for row in rows:
+            name = row["name"] if isinstance(row, sqlite3.Row) else row[1]
+            if name == column:
+                return True
+        return False
+
+    # List of (table, column, alter_sql) to ensure
+    checks: list[tuple[str, str, str]] = [
+        ("workflows", "parent_workflow_id", "ALTER TABLE workflows ADD COLUMN parent_workflow_id TEXT"),
+        ("memories", "last_accessed", "ALTER TABLE memories ADD COLUMN last_accessed INTEGER"),
+        ("memories", "embedding_id", "ALTER TABLE memories ADD COLUMN embedding_id TEXT"),
+        ("memories", "action_id", "ALTER TABLE memories ADD COLUMN action_id TEXT"),
+        ("memories", "thought_id", "ALTER TABLE memories ADD COLUMN thought_id TEXT"),
+        ("memories", "artifact_id", "ALTER TABLE memories ADD COLUMN artifact_id TEXT"),
+        ("goals", "sequence_number", "ALTER TABLE goals ADD COLUMN sequence_number INTEGER"),
+    ]
+
+    for table, column, alter_sql in checks:
+        try:
+            present = await _column_exists(table, column)
+        except Exception:
+            # If the table doesn't exist or PRAGMA failed, skip and let other
+            # bootstrap steps handle the error.
+            logger.debug(f"Skipping legacy column check for {table}.{column}: table missing or PRAGMA failed")
+            continue
+
+        if not present:
+            try:
+                await conn.execute(alter_sql)
+                logger.info(f"Added missing column {table}.{column} via migration")
+            except aiosqlite.OperationalError as oe:
+                # If adding the column fails due to SQL syntax or other issues,
+                # log and raise a ToolError so bootstrap doesn't silently proceed
+                # in a partially-broken state for critical columns.
+                logger.error(
+                    f"Failed to add legacy column {table}.{column}: {oe}",
+                    exc_info=True,
+                )
+                raise ToolError(f"Failed to add required column {table}.{column}: {oe}") from oe
+
+
+
 def _fmt_id(val: Any, length: int = 8) -> str:
     """Return a short id string safe for logs."""
     s = str(val) if val is not None else "?"
@@ -1141,10 +1194,37 @@ class DBConnection:
                 conn.row_factory = aiosqlite.Row
                 await self._cfg(conn)
                 await conn.execute("BEGIN IMMEDIATE;")
+
+                # Execute schema statements defensively: older DB files may be
+                # missing columns referenced by later statements (for example
+                # an index on a newly-added column). Execute each statement
+                # individually and only log and continue on OperationalError so
+                # migration helpers (like _ensure_idempotency_columns) can run
+                # afterwards to bring the DB up to date.
                 for stmt in SCHEMA_STATEMENTS:
-                    await conn.execute(stmt)
+                    try:
+                        await conn.execute(stmt)
+                    except aiosqlite.OperationalError as oe:
+                        logger.warning(
+                            f"UMS schema statement failed (continuing): {oe} -- stmt={_fmt_id(stmt, 64)}",
+                            exc_info=False,
+                        )
+                    except Exception as e:
+                        logger.error(
+                            f"UMS schema statement error (continuing): {e} -- stmt={_fmt_id(stmt, 64)}",
+                            exc_info=True,
+                        )
+
                 await conn.commit()
+                # Run post-bootstrap tasks (add missing columns, idempotency, etc.)
                 await _ensure_idempotency_columns(conn)
+                # Ensure other legacy columns that older DBs may lack
+                try:
+                    await _ensure_legacy_columns(conn)
+                except ToolError:
+                    # Re-raise to ensure bootstrap fails visibly if we couldn't
+                    # add critical columns (e.g., parent_workflow_id)
+                    raise
                 if conn.in_transaction:
                     await conn.commit()
                 self._schema_ready.add(self.db_path)
@@ -2969,28 +3049,67 @@ async def create_workflow(
             meta_json = await MemoryUtils.serialize(metadata)
             title_clean = title.strip()
 
-            await conn.execute(
-                """
-                INSERT INTO workflows (
-                    workflow_id,title,description,goal,status,
-                    created_at,updated_at,parent_workflow_id,metadata,last_active,
-                    idempotency_key
-                ) VALUES (?,?,?,?,?,?,?,?,?,?,?)
-                """,
-                (
-                    wf_id,
-                    title_clean,
-                    description,
-                    goal,
-                    WorkflowStatus.ACTIVE.value,
-                    now,
-                    now,
-                    parent_workflow_id,
-                    meta_json,
-                    now,
-                    idempotency_key,
-                ),
-            )
+            try:
+                await conn.execute(
+                    """
+                    INSERT INTO workflows (
+                        workflow_id,title,description,goal,status,
+                        created_at,updated_at,parent_workflow_id,metadata,last_active,
+                        idempotency_key
+                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?)
+                    """,
+                    (
+                        wf_id,
+                        title_clean,
+                        description,
+                        goal,
+                        WorkflowStatus.ACTIVE.value,
+                        now,
+                        now,
+                        parent_workflow_id,
+                        meta_json,
+                        now,
+                        idempotency_key,
+                    ),
+                )
+            except sqlite3.OperationalError as oe:
+                msg = str(oe).lower()
+                # If the DB is from an older schema missing this column, try to add it
+                if "no such column" in msg and "parent_workflow_id" in msg:
+                    logger.warning(
+                        "Detected missing parent_workflow_id column during INSERT; attempting to add column and retrying",
+                        exc_info=False,
+                    )
+                    try:
+                        await conn.execute("ALTER TABLE workflows ADD COLUMN parent_workflow_id TEXT;")
+                        # retry the insert once
+                        await conn.execute(
+                            """
+                            INSERT INTO workflows (
+                                workflow_id,title,description,goal,status,
+                                created_at,updated_at,parent_workflow_id,metadata,last_active,
+                                idempotency_key
+                            ) VALUES (?,?,?,?,?,?,?,?,?,?,?)
+                            """,
+                            (
+                                wf_id,
+                                title_clean,
+                                description,
+                                goal,
+                                WorkflowStatus.ACTIVE.value,
+                                now,
+                                now,
+                                parent_workflow_id,
+                                meta_json,
+                                now,
+                                idempotency_key,
+                            ),
+                        )
+                    except Exception as e2:
+                        logger.error("Failed to add parent_workflow_id and retry insert: %s", e2, exc_info=True)
+                        raise
+                else:
+                    raise
 
             if tags:
                 await MemoryUtils.process_tags(conn, wf_id, tags, "workflow")
