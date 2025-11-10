@@ -3,6 +3,7 @@
 import json
 import math
 import sqlite3
+import sys
 from collections import Counter, defaultdict, deque
 from datetime import datetime
 from pathlib import Path
@@ -3832,7 +3833,7 @@ def setup_ums_api(app: FastAPI) -> None:
         )
     ) -> PerformanceOverviewResponse:
         """Get comprehensive performance overview with metrics and trends"""
-        import traceback, sys
+        import traceback
         try:
             from .ums_database import ensure_database_exists
             if not ensure_database_exists():
@@ -3861,18 +3862,42 @@ def setup_ums_api(app: FastAPI) -> None:
             """, (since_timestamp,))
 
             overview_result = cursor.fetchone()
-            overview_data = dict(zip([d[0] for d in cursor.description], overview_result, strict=False)) if overview_result else {}
+            column_names = [d[0] for d in cursor.description]
+            raw_overview = dict(zip(column_names, overview_result)) if overview_result else {}
+
+            overview_data = {}
+            for key, value in raw_overview.items():
+                if key in {"min_execution_time", "max_execution_time"}:
+                    overview_data[key] = value
+                else:
+                    overview_data[key] = 0 if value is None else value
+
+            # Guarantee required numeric fields exist even when the table is empty
+            required_defaults = {
+                "total_actions": 0,
+                "active_workflows": 0,
+                "avg_execution_time": 0.0,
+                "successful_actions": 0,
+                "failed_actions": 0,
+                "tools_used": 0,
+            }
+            for field, default in required_defaults.items():
+                overview_data.setdefault(field, default)
 
             # Calculate derived metrics
-            success_rate = (overview_data.get('successful_actions', 0) / max(1, overview_data.get('total_actions', 1))) * 100
-            throughput = overview_data.get('total_actions', 0) / max(1, hours_back)
+            total_actions = overview_data.get("total_actions") or 0
+            successful_actions = overview_data.get("successful_actions") or 0
+            active_workflows = overview_data.get("active_workflows") or 0
+
+            success_rate = (successful_actions / max(1, total_actions)) * 100 if total_actions else 0.0
+            throughput = total_actions / max(1, hours_back)
 
             overview_stats = PerformanceOverviewStats(
                 **overview_data,
                 success_rate_percentage=success_rate,
                 throughput_per_hour=throughput,
                 error_rate_percentage=100 - success_rate,
-                avg_workflow_size=overview_data.get('total_actions', 0) / max(1, overview_data.get('active_workflows', 1))
+                avg_workflow_size=total_actions / max(1, active_workflows),
             )
 
             # Performance timeline
@@ -3897,10 +3922,16 @@ def setup_ums_api(app: FastAPI) -> None:
                 ORDER BY time_bucket
             """, (since_timestamp,))
 
-            timeline_data = [
-                TimelineBucket(**dict(zip([d[0] for d in cursor.description], row, strict=False)))
-                for row in cursor.fetchall()
-            ]
+            timeline_rows = cursor.fetchall()
+            column_names = [d[0] for d in cursor.description]
+            timeline_data = []
+            for row in timeline_rows:
+                row_dict = dict(zip(column_names, row))
+                row_dict["action_count"] = int(row_dict.get("action_count") or 0)
+                row_dict["successful_count"] = int(row_dict.get("successful_count") or 0)
+                row_dict["failed_count"] = int(row_dict.get("failed_count") or 0)
+                row_dict["workflow_count"] = int(row_dict.get("workflow_count") or 0)
+                timeline_data.append(TimelineBucket(**row_dict))
 
             # Resource utilization by tool
             cursor.execute("""
@@ -3916,10 +3947,14 @@ def setup_ums_api(app: FastAPI) -> None:
                 ORDER BY usage_count DESC
             """, (since_timestamp,))
 
-            tool_utilization = [
-                ToolUtilization(**dict(zip([d[0] for d in cursor.description], row, strict=False)))
-                for row in cursor.fetchall()
-            ]
+            tool_rows = cursor.fetchall()
+            column_names = [d[0] for d in cursor.description]
+            tool_utilization = []
+            for row in tool_rows:
+                row_dict = dict(zip(column_names, row))
+                row_dict["usage_count"] = int(row_dict.get("usage_count") or 0)
+                row_dict["success_count"] = int(row_dict.get("success_count") or 0)
+                tool_utilization.append(ToolUtilization(**row_dict))
 
             # Top bottlenecks (slowest operations)
             cursor.execute("""
@@ -3938,10 +3973,13 @@ def setup_ums_api(app: FastAPI) -> None:
                 LIMIT 10
             """, (since_timestamp,))
 
-            bottlenecks = [
-                Bottleneck(**dict(zip([d[0] for d in cursor.description], row, strict=False)))
-                for row in cursor.fetchall()
-            ]
+            bottleneck_rows = cursor.fetchall()
+            column_names = [d[0] for d in cursor.description]
+            bottlenecks = []
+            for row in bottleneck_rows:
+                row_dict = dict(zip(column_names, row))
+                row_dict["duration"] = float(row_dict.get("duration") or 0.0)
+                bottlenecks.append(Bottleneck(**row_dict))
 
             conn.close()
 

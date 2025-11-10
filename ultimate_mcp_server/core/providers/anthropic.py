@@ -179,14 +179,54 @@ class AnthropicProvider(BaseProvider):
             json_mode_requested=json_mode,
         )
 
+        attempted_models = [actual_model_name]
+
+        async def _execute_with_model(model_name: str) -> tuple:
+            params = dict(api_params)
+            params["model"] = model_name
+            return await self.process_with_timer(self.client.messages.create, **params)
+
         try:
-            response, processing_time = await self.process_with_timer(
-                self.client.messages.create, **api_params
-            )
+            response, processing_time = await _execute_with_model(actual_model_name)
         except Exception as e:
-            error_message = f"Anthropic API error during completion for model {actual_model_name}: {type(e).__name__}: {str(e)}"
-            self.logger.error(error_message, exc_info=True)
-            raise ConnectionError(error_message) from e
+            is_not_found = (
+                getattr(e, "__class__", type(e)).__name__ == "NotFoundError"
+                or "not_found" in str(e).lower()
+                or "404" in str(getattr(e, "status_code", ""))
+            )
+
+            if is_not_found:
+                fallback_model_id = self.get_default_model()
+                fallback_model_name = self.strip_provider_prefix(fallback_model_id)
+                if fallback_model_name not in attempted_models:
+                    self.logger.warning(
+                        f"Anthropic model {actual_model_name} not found; retrying with fallback {fallback_model_name}"
+                    )
+                    attempted_models.append(fallback_model_name)
+                    try:
+                        response, processing_time = await _execute_with_model(fallback_model_name)
+                        actual_model_name = fallback_model_name
+                    except Exception as fallback_exc:
+                        error_message = (
+                            "Anthropic API error during completion for model "
+                            f"{actual_model_name}: {type(fallback_exc).__name__}: {fallback_exc}"
+                        )
+                        self.logger.error(error_message, exc_info=True)
+                        raise ConnectionError(error_message) from fallback_exc
+                else:
+                    error_message = (
+                        "Anthropic API error during completion for model "
+                        f"{actual_model_name}: {type(e).__name__}: {e}"
+                    )
+                    self.logger.error(error_message, exc_info=True)
+                    raise ConnectionError(error_message) from e
+            else:
+                error_message = (
+                    "Anthropic API error during completion for model "
+                    f"{actual_model_name}: {type(e).__name__}: {e}"
+                )
+                self.logger.error(error_message, exc_info=True)
+                raise ConnectionError(error_message) from e
 
         if (
             not response.content
