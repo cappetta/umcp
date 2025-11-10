@@ -104,6 +104,48 @@ def extract_payload(result):
         return None
 
 
+def normalise_tool_result(result):
+    """Return (success, data, payload, error_message) for a tool response."""
+
+    payload = extract_payload(result)
+
+    success = True
+    data_section = None
+    error_message = None
+
+    if isinstance(payload, dict):
+        if "success" in payload:
+            success = bool(payload.get("success"))
+
+        # Prefer explicit error keys, but also honour descriptive messages
+        error_message = payload.get("error") or payload.get("message")
+
+        data_candidate = payload.get("data")
+        if data_candidate is not None:
+            data_section = data_candidate
+
+        if data_section is None:
+            # Fall back to payload itself when it already looks like a useful dict
+            key_hints = {
+                "workflow_id",
+                "workflowId",
+                "memory_id",
+                "linked_memory_id",
+                "state_id",
+                "cognitive_state_id",
+            }
+            if key_hints & set(payload.keys()):
+                data_section = payload
+
+        if data_section is None:
+            data_section = payload
+
+    else:
+        data_section = payload
+
+    return success, data_section, payload, error_message
+
+
 async def test_mcp_interface():
     """Test the MCP interface functionality."""
     server_url = "http://127.0.0.1:8013/mcp"
@@ -334,18 +376,28 @@ async def test_memory_system():
             # Ensure a workflow exists for memory/cognitive state tests
             workflow_id = None
             try:
-                wf_result = await client.call_tool("create_workflow", {"title": "test_workflow_from_client"})
-                wf_data = extract_payload(wf_result)
-                if isinstance(wf_data, dict):
-                    workflow_id = wf_data.get("workflow_id") or wf_data.get("workflowId")
-            except Exception:
+                wf_result = await client.call_tool(
+                    "create_workflow", {"title": "test_workflow_from_client"}
+                )
+                wf_success, wf_data, wf_payload, wf_error = normalise_tool_result(wf_result)
+                if wf_success and isinstance(wf_data, dict):
+                    workflow_id = (
+                        wf_data.get("workflow_id")
+                        or wf_data.get("workflowId")
+                        or (isinstance(wf_payload, dict) and wf_payload.get("workflow_id"))
+                    )
+                elif wf_error:
+                    print(f"❌ create_workflow failed: {wf_error}")
+            except Exception as exc:
                 # Non-fatal: some servers may not expose create_workflow; fall back to None
+                print(f"❌ create_workflow exception: {exc}")
                 workflow_id = None
 
             # Test memory storage
             if not workflow_id:
                 print("⚠️ Skipping memory tests: no workflow_id available (create_workflow not exposed)")
             else:
+                stored_memory_id = None
                 try:
                     store_params = {
                         "memory_type": "test",
@@ -358,23 +410,37 @@ async def test_memory_system():
                     memory_result = await client.call_tool("store_memory", store_params)
 
                     if memory_result:
-                        memory_data = extract_payload(memory_result)
-                        if isinstance(memory_data, dict) and memory_data.get('success'):
-                            memory_id = memory_data.get('memory_id')
-                            print(f"✅ Memory stored: {memory_id}")
+                        mem_success, mem_data, mem_payload, mem_error = normalise_tool_result(
+                            memory_result
+                        )
+                        if mem_success and isinstance(mem_data, dict):
+                            stored_memory_id = (
+                                mem_data.get("linked_memory_id")
+                                or mem_data.get("memory_id")
+                                or (isinstance(mem_payload, dict) and mem_payload.get("memory_id"))
+                            )
+                            print(f"✅ Memory stored: {stored_memory_id}")
 
                             # Test memory retrieval
-                            try:
-                                get_result = await client.call_tool("get_memory_by_id", {"memory_id": memory_id})
-                                if get_result:
-                                    print("✅ Memory retrieved successfully")
-                            except Exception as e:
-                                print(f"❌ Memory retrieval: {e}")
+                            if stored_memory_id:
+                                try:
+                                    get_result = await client.call_tool(
+                                        "get_memory_by_id", {"memory_id": stored_memory_id}
+                                    )
+                                    get_success, _, _, get_error = normalise_tool_result(get_result)
+                                    if get_success:
+                                        print("✅ Memory retrieved successfully")
+                                    else:
+                                        print(f"❌ Memory retrieval failed: {get_error or 'unknown error'}")
+                                except Exception as e:
+                                    print(f"❌ Memory retrieval: {e}")
                         else:
-                            print(f"❌ Memory storage failed: {memory_data.get('error')}")
+                            print(
+                                f"❌ Memory storage failed: {mem_error or mem_payload}"
+                            )
                 except Exception as e:
                     print(f"❌ Memory system: {e}")
-                
+
             # Test cognitive state
             if not workflow_id:
                 print("⚠️ Skipping cognitive state tests: no workflow_id available (create_workflow not exposed)")
@@ -384,7 +450,7 @@ async def test_memory_system():
                     state_params = {
                         "workflow_id": workflow_id,
                         "title": "test_state_from_client",
-                        "working_memory_ids": [],
+                        "working_memory_ids": [stored_memory_id] if stored_memory_id else [],
                         "focus_area_ids": [],
                         "context_action_ids": [],
                         "current_goals": [],
@@ -393,11 +459,16 @@ async def test_memory_system():
                     state_result = await client.call_tool("save_cognitive_state", state_params)
 
                     if state_result:
-                        state_data = extract_payload(state_result)
-                        if isinstance(state_data, dict) and state_data.get('success'):
+                        state_success, _, state_payload, state_error = normalise_tool_result(
+                            state_result
+                        )
+                        if state_success:
                             print("✅ Cognitive state saved")
                         else:
-                            print(f"❌ Cognitive state failed: {state_data.get('error') if isinstance(state_data, dict) else state_data}")
+                            print(
+                                "❌ Cognitive state failed: "
+                                f"{state_error or state_payload}"
+                            )
 
                 except Exception as e:
                     print(f"❌ Cognitive state: {e}")
