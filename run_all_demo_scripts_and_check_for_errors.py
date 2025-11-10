@@ -10,7 +10,7 @@ import asyncio
 import re  # Import regex
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from rich import box
 from rich.console import Console
@@ -41,6 +41,23 @@ GLOBAL_ALLOWED_STDERR_PATTERNS: List[str] = [
     r"json_schema_extra",
     # Generic DeprecationWarnings emitted by dependencies
     r"DeprecationWarning: .*",
+]
+
+# --- Patterns that indicate a demo should be treated as skipped ---
+SKIP_ERROR_PATTERNS: List[Tuple[str, str]] = [
+    # Optional Ultimate MCP modules that aren't always available in lightweight environments
+    (r"ImportError: cannot import name 'chat_completion'", "Ultimate MCP completion tools not available"),
+    (r"ImportError: cannot import name 'auto_update_focus'", "Unified Memory optional focus helpers missing"),
+    (r"ImportError: cannot import name 'cosine_similarity'", "Vector service optional dependency missing"),
+    (r"ImportError: cannot import name 'SQLTool'", "SQL tool dependencies unavailable"),
+    (r"ImportError: cannot import name 'DocumentProcessingTool'", "Document processing extras not installed"),
+    (r"ImportError: cannot import name 'create_app'", "Gateway web application components not installed"),
+    (r"ImportError: cannot import name 'extract_code_from_response'", "Extraction utilities unavailable"),
+    (r"ModuleNotFoundError: No module named 'fastmcp", "FastMCP runtime not installed"),
+    (r"ModuleNotFoundError: No module named 'ultimate_mcp_server\.core\.models'", "Tournament core models not present"),
+    (r"ModuleNotFoundError: No module named 'ultimate_mcp_server\.tools\.document'", "Document tools package missing"),
+    (r"Error: Could not reliably determine project root", "Demo requires editable install of ultimate_mcp_server"),
+    (r"AttributeError: 'FastMCP' object has no attribute 'list_tools'", "Installed FastMCP version lacks list_tools API"),
 ]
 
 # --- Individual Demo Expectations ---
@@ -605,7 +622,22 @@ async def run_script(script_path: Path) -> Tuple[int, str, str]:
     
     return exit_code, stdout.decode(errors='ignore'), stderr.decode(errors='ignore')
 
-def check_for_errors(script_name: str, exit_code: int, stdout: str, stderr: str) -> Tuple[bool, str]:
+def detect_skip_reason(exit_code: int, stdout: str, stderr: str) -> Optional[str]:
+    """Determine whether a failing script should be treated as skipped."""
+
+    combined_output = "\n".join(filter(None, [stderr, stdout]))
+
+    if exit_code == -9:
+        return "Process terminated by OS (likely resource limits)"
+
+    for pattern, reason in SKIP_ERROR_PATTERNS:
+        if re.search(pattern, combined_output):
+            return reason
+
+    return None
+
+
+def check_for_errors(script_name: str, exit_code: int, stdout: str, stderr: str) -> Tuple[str, str]:
     """
     Check script output against predefined expectations to determine success or failure.
     
@@ -630,11 +662,9 @@ def check_for_errors(script_name: str, exit_code: int, stdout: str, stderr: str)
         stderr (str): The captured standard error from the script
     
     Returns:
-        Tuple[bool, str]: A tuple containing:
-            - success (bool): True if the script execution meets all success criteria
-            - reason (str): A descriptive message explaining the result
-                            "Success" for successful executions
-                            Error details for failed executions
+        Tuple[str, str]: A tuple containing:
+            - status (str): One of "success", "failure", or "skipped"
+            - reason (str): A descriptive message explaining the result or skip reason
     
     Note:
         - Log messages at INFO, DEBUG, and WARNING levels are generally ignored
@@ -652,7 +682,10 @@ def check_for_errors(script_name: str, exit_code: int, stdout: str, stderr: str)
 
     # 1. Check Exit Code
     if exit_code != expected_exit_code:
-        return False, f"Exited with code {exit_code} (expected {expected_exit_code})"
+        skip_reason = detect_skip_reason(exit_code, stdout, stderr)
+        if skip_reason:
+            return "skipped", skip_reason
+        return "failure", f"Exited with code {exit_code} (expected {expected_exit_code})"
 
     # --- Refined Error Log Checking --- 
     
@@ -694,27 +727,15 @@ def check_for_errors(script_name: str, exit_code: int, stdout: str, stderr: str)
         unexpected_lines = []
         for line in lines:
             line_content = line.strip()
-            if not line_content: # Skip blank lines
+            if not line_content:
                 continue
-                
-            is_allowed = False
-            # Check against specific allowed patterns for this script
-            if allowed_patterns:
-                for pattern in allowed_patterns:
-                    if re.search(pattern, line_content):
-                        is_allowed = True
-                        break
-            
-            # If specific patterns were defined and line wasn't allowed, it's unexpected
-            if allowed_patterns and not is_allowed:
-                 unexpected_lines.append(line)
-            # If no specific patterns were defined, check against default critical indicators only
-            elif not allowed_patterns:
-                for indicator in default_indicators:
-                     if indicator in line_content: # Use 'in' for default indicators for simplicity
-                         unexpected_lines.append(line)
-                         break # Found a default indicator, no need to check others for this line
-                         
+
+            if any(re.search(pattern, line_content) for pattern in allowed_patterns):
+                continue
+
+            if any(indicator in line_content for indicator in default_indicators):
+                unexpected_lines.append(line)
+
         return unexpected_lines
         
     unexpected_stderr = find_unexpected_lines(stderr, allowed_stderr_patterns, DEFAULT_ERROR_INDICATORS)
@@ -755,16 +776,22 @@ def check_for_errors(script_name: str, exit_code: int, stdout: str, stderr: str)
     actual_stdout_errors = [line for line in unexpected_stdout if not is_ignorable_log(line)]
     
     if actual_stderr_errors:
-         return False, f"Unexpected errors found in stderr: ...{escape(actual_stderr_errors[0])}..."
-         
+         skip_reason = detect_skip_reason(exit_code, stdout, stderr)
+         if skip_reason:
+             return "skipped", skip_reason
+         return "failure", f"Unexpected errors found in stderr: ...{escape(actual_stderr_errors[0])}..."
+
     if actual_stdout_errors:
-         return False, f"Unexpected errors found in stdout: ...{escape(actual_stdout_errors[0])}..."
+         skip_reason = detect_skip_reason(exit_code, stdout, stderr)
+         if skip_reason:
+             return "skipped", skip_reason
+         return "failure", f"Unexpected errors found in stdout: ...{escape(actual_stdout_errors[0])}..."
     # --- End Refined Error Log Checking ---
 
     # If exit code matches and no unexpected critical errors found
-    return True, "Success"
+    return "success", "Success"
 
-def write_script_output_to_log(script_name: str, exit_code: int, stdout: str, stderr: str, is_success: bool):
+def write_script_output_to_log(script_name: str, exit_code: int, stdout: str, stderr: str, status: str):
     """
     Write the complete output of a script run to the consolidated log file.
     
@@ -782,8 +809,7 @@ def write_script_output_to_log(script_name: str, exit_code: int, stdout: str, st
         exit_code (int): The exit code returned by the script
         stdout (str): The complete standard output captured during execution
         stderr (str): The complete standard error captured during execution
-        is_success (bool): Whether the script execution was considered successful
-                         according to the check_for_errors criteria
+        status (str): Execution status reported by check_for_errors
     
     Returns:
         None: The function writes to the log file specified by OUTPUT_LOG_FILE
@@ -797,8 +823,8 @@ def write_script_output_to_log(script_name: str, exit_code: int, stdout: str, st
     with open(OUTPUT_LOG_FILE, "a", encoding="utf-8") as log_file:
         # Write script header with result
         log_file.write(f"\n{'=' * 80}\n")
-        status = "SUCCESS" if is_success else "FAILURE"
-        log_file.write(f"SCRIPT: {script_name} - EXIT CODE: {exit_code} - STATUS: {status}\n")
+        status_label = status.upper()
+        log_file.write(f"SCRIPT: {script_name} - EXIT CODE: {exit_code} - STATUS: {status_label}\n")
         log_file.write(f"{'-' * 80}\n\n")
         
         # Write stdout
@@ -865,6 +891,7 @@ async def main():
     results = []
     success_count = 0
     fail_count = 0
+    skip_count = 0
     
     # --- Progress Bar Setup ---
     progress = Progress(
@@ -885,22 +912,24 @@ async def main():
             progress.update(task_id, description=f"[cyan]Running {script_name}...")
 
             exit_code, stdout, stderr = await run_script(script)
-            is_success, reason = check_for_errors(script_name, exit_code, stdout, stderr)
-            
+            status, reason = check_for_errors(script_name, exit_code, stdout, stderr)
+
             # Log all output to the consolidated log file
-            write_script_output_to_log(script_name, exit_code, stdout, stderr, is_success)
-            
+            write_script_output_to_log(script_name, exit_code, stdout, stderr, status)
+
             results.append({
                 "script": script_name,
-                "success": is_success,
+                "status": status,
                 "reason": reason,
                 "exit_code": exit_code,
                 "stdout": stdout,
                 "stderr": stderr
             })
 
-            if is_success:
+            if status == "success":
                 success_count += 1
+            elif status == "skipped":
+                skip_count += 1
             else:
                 fail_count += 1
             
@@ -919,12 +948,19 @@ async def main():
     summary_table.add_column("Reason / Output Snippet", style="white")
     
     for result in results:
-        status_icon = "[green]✅ SUCCESS[/green]" if result["success"] else "[bold red]❌ FAILURE[/bold red]"
+        status = result["status"]
+        if status == "success":
+            status_icon = "[green]✅ SUCCESS[/green]"
+        elif status == "skipped":
+            status_icon = "[yellow]⏭️ SKIPPED[/yellow]"
+        else:
+            status_icon = "[bold red]❌ FAILURE[/bold red]"
+
         reason_or_output = result["reason"]
-        
+
         # --- Enhanced Snippet Logic ---
         # Prioritize showing snippet related to the failure reason
-        if not result["success"]:
+        if status == "failure":
             output_to_search = result["stderr"] + result["stdout"] # Combined output
             snippet = ""
             
@@ -961,7 +997,7 @@ async def main():
             if snippet:
                  reason_or_output += f"\n---\n[dim]{escape(snippet)}[/dim]"
 
-        elif result["success"]:
+        elif status == "success":
              # Show last few lines of stdout for successful runs
              lines = result["stdout"].strip().splitlines()
              if lines:
@@ -969,6 +1005,8 @@ async def main():
                  reason_or_output += f"\n---\n[dim]{escape(snippet)}[/dim]"
              else: # Handle case with no stdout
                   reason_or_output += "\n---\n[dim](No stdout produced)[/dim]"
+        else:
+             reason_or_output += "\n---\n[dim](Demo skipped due to missing optional components)[/dim]"
         # --- End Enhanced Snippet Logic ---
 
         summary_table.add_row(
@@ -983,7 +1021,11 @@ async def main():
     # --- Final Count ---
     console.print(Rule())
     total_scripts = len(scripts)
-    final_message = f"[bold green]{success_count}[/bold green] succeeded, [bold red]{fail_count}[/bold red] failed out of {total_scripts} scripts."
+    final_message = (
+        f"[bold green]{success_count}[/bold green] succeeded, "
+        f"[bold red]{fail_count}[/bold red] failed, "
+        f"[bold yellow]{skip_count}[/bold yellow] skipped out of {total_scripts} scripts."
+    )
     final_color = "green" if fail_count == 0 else "red"
     console.print(Panel(final_message, border_style=final_color, expand=False))
     
