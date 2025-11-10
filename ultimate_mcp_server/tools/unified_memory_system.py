@@ -18,6 +18,7 @@ Key Features:
 import asyncio
 import contextlib
 import json
+import sqlite3
 import math
 import os
 import random
@@ -643,6 +644,83 @@ SCHEMA_STATEMENTS = [
 ]
 
 
+_IDEMPOTENCY_BACKFILL: tuple[tuple[str, str, str, tuple[str, ...]], ...] = (
+    (
+        "workflows",
+        "idempotency_key",
+        "ALTER TABLE workflows ADD COLUMN idempotency_key TEXT",
+        ("CREATE INDEX IF NOT EXISTS idx_workflows_idempotency_key ON workflows(idempotency_key);",),
+    ),
+    (
+        "actions",
+        "idempotency_key",
+        "ALTER TABLE actions ADD COLUMN idempotency_key TEXT",
+        (
+            "CREATE INDEX IF NOT EXISTS idx_actions_idempotency ON actions(workflow_id, idempotency_key);",
+        ),
+    ),
+    (
+        "artifacts",
+        "idempotency_key",
+        "ALTER TABLE artifacts ADD COLUMN idempotency_key TEXT",
+        (
+            "CREATE INDEX IF NOT EXISTS idx_artifacts_idempotency ON artifacts(workflow_id, idempotency_key);",
+        ),
+    ),
+    (
+        "thought_chains",
+        "idempotency_key",
+        "ALTER TABLE thought_chains ADD COLUMN idempotency_key TEXT",
+        (
+            "CREATE INDEX IF NOT EXISTS idx_thought_chains_idempotency ON thought_chains(workflow_id, idempotency_key);",
+        ),
+    ),
+    (
+        "thoughts",
+        "idempotency_key",
+        "ALTER TABLE thoughts ADD COLUMN idempotency_key TEXT",
+        (
+            "CREATE INDEX IF NOT EXISTS idx_thoughts_idempotency ON thoughts(thought_chain_id, idempotency_key);",
+        ),
+    ),
+    (
+        "memories",
+        "idempotency_key",
+        "ALTER TABLE memories ADD COLUMN idempotency_key TEXT",
+        (
+            "CREATE INDEX IF NOT EXISTS idx_memories_idempotency ON memories(workflow_id, idempotency_key);",
+        ),
+    ),
+    (
+        "goals",
+        "idempotency_key",
+        "ALTER TABLE goals ADD COLUMN idempotency_key TEXT",
+        (
+            "CREATE INDEX IF NOT EXISTS idx_goals_idempotency ON goals(workflow_id, idempotency_key);",
+        ),
+    ),
+)
+
+
+async def _ensure_idempotency_columns(conn: aiosqlite.Connection) -> None:
+    """Backfill idempotency columns for databases created before the new schema."""
+
+    async def _column_exists(table: str, column: str) -> bool:
+        async with conn.execute(f"PRAGMA table_info({table})") as cursor:
+            rows = await cursor.fetchall()
+        for row in rows:
+            name = row["name"] if isinstance(row, sqlite3.Row) else row[1]
+            if name == column:
+                return True
+        return False
+
+    for table, column, alter_sql, index_sqls in _IDEMPOTENCY_BACKFILL:
+        if not await _column_exists(table, column):
+            await conn.execute(alter_sql)
+        for sql in index_sqls:
+            await conn.execute(sql)
+
+
 def _fmt_id(val: Any, length: int = 8) -> str:
     """Return a short id string safe for logs."""
     s = str(val) if val is not None else "?"
@@ -1043,6 +1121,7 @@ class DBConnection:
                 await conn.execute("BEGIN IMMEDIATE;")
                 for stmt in SCHEMA_STATEMENTS:
                     await conn.execute(stmt)
+                await _ensure_idempotency_columns(conn)
                 await conn.commit()
                 self._schema_ready.add(self.db_path)
             except Exception as e:
