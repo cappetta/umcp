@@ -55,7 +55,7 @@ async def compare_claude_models(tracker: CostTracker):
         
         # Select specific models to compare (Ensure these are valid and available)
         claude_models = [
-            "anthropic/claude-3-7-sonnet-20250219", 
+            "anthropic/claude-sonnet-4-5-20250929",
             "anthropic/claude-3-5-haiku-20241022"
         ]
         # Filter based on available models

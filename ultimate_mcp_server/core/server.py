@@ -931,6 +931,7 @@ first and be prepared to adapt to available providers.
             "store_memory",
             "save_cognitive_state",
             "get_memory_by_id",
+            "create_workflow",
         ]
 
         # Conditionally register tools based on load_all flag
@@ -2391,9 +2392,10 @@ def start_server(
         # 2) Combined application – avoid overlapping mounts and trailing-slash redirects
         # Add a lightweight discovery route at / so health checks and tests
         # can easily discover the MCP endpoint and the REST API locations.
-        async def _discovery(scope, receive, send):
-            # ASGI-compatible tiny endpoint that returns discovery JSON
-            from starlette.responses import JSONResponse
+        from starlette.responses import JSONResponse
+
+        async def _discovery(request):
+            # Starlette automatically handles ASGI interaction when returning a Response
             try:
                 payload = {
                     "type": "mcp-server",
@@ -2403,14 +2405,19 @@ def start_server(
                     "api_docs": "/api/docs",
                     "api_spec": "/api/openapi.json",
                 }
-                response = JSONResponse(content=payload)
-                await response(scope, receive, send)
+                headers = {
+                    "X-MCP-Server": "true",
+                    "X-MCP-Version": "1.0.0",
+                    "X-MCP-Transport": "http",
+                }
+                return JSONResponse(content=payload, headers=headers)
             except Exception as exc:  # defensive: log traceback and return a helpful error JSON
                 get_logger("ultimate_mcp_server.core.server").error(
                     f"Discovery endpoint failed: {exc}", exc_info=True
                 )
-                err = JSONResponse(content={"error": "Discovery failed", "detail": str(exc)}, status_code=500)
-                await err(scope, receive, send)
+                return JSONResponse(
+                    content={"error": "Discovery failed", "detail": str(exc)}, status_code=500
+                )
 
         final_app = Starlette(
             routes=[

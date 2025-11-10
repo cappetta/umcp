@@ -3836,15 +3836,51 @@ def setup_ums_api(app: FastAPI) -> None:
         import traceback
         try:
             from .ums_database import ensure_database_exists
+
             if not ensure_database_exists():
-                msg = f"UMS database file not found at {database_path}"
-                print(f"[PERF ERROR] {msg}", file=sys.stderr)
-                return JSONResponse(content={"error": "Database missing", "detail": msg}, status_code=500)
+                try:
+                    initialize_unified_memory_schema(str(database_path))
+                except Exception as schema_exc:
+                    print(
+                        f"[PERF ERROR] Failed to initialize UMS database: {schema_exc}",
+                        file=sys.stderr,
+                    )
+
+            if not ensure_database_exists():
+                now = datetime.now()
+                empty_stats = PerformanceOverviewStats(
+                    total_actions=0,
+                    active_workflows=0,
+                    avg_execution_time=0.0,
+                    min_execution_time=None,
+                    max_execution_time=None,
+                    successful_actions=0,
+                    failed_actions=0,
+                    tools_used=0,
+                    success_rate_percentage=0.0,
+                    throughput_per_hour=0.0,
+                    error_rate_percentage=0.0,
+                    avg_workflow_size=0.0,
+                )
+                return PerformanceOverviewResponse(
+                    overview=empty_stats,
+                    timeline=[],
+                    tool_utilization=[],
+                    bottlenecks=[],
+                    analysis_period={
+                        "hours_back": hours_back,
+                        "granularity": granularity,
+                        "start_time": (now.timestamp() - (hours_back * 3600)),
+                        "end_time": now.timestamp(),
+                    },
+                    timestamp=now.isoformat(),
+                )
 
             conn = get_db_connection()
             cursor = conn.cursor()
 
-            since_timestamp = datetime.now().timestamp() - (hours_back * 3600)
+            current_time = datetime.now()
+            since_timestamp = current_time.timestamp() - (hours_back * 3600)
 
             # Overall performance metrics
             cursor.execute("""
@@ -3992,9 +4028,9 @@ def setup_ums_api(app: FastAPI) -> None:
                     'hours_back': hours_back,
                     'granularity': granularity,
                     'start_time': since_timestamp,
-                    'end_time': datetime.now().timestamp()
+                    'end_time': current_time.timestamp()
                 },
-                timestamp=datetime.now().isoformat()
+                timestamp=current_time.isoformat()
             )
 
         except Exception as exc:

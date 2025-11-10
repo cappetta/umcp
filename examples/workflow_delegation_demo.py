@@ -289,7 +289,7 @@ def _get_provider_for_model(model_name: str) -> str:
     # Accept both 'provider/model' and legacy short names
     model_lower = model_name.lower()
     if '/' in model_lower:
-        # e.g., 'gemini/gemini-2.0-flash' or 'anthropic/claude-3-7-sonnet-20250219'
+        # e.g., 'gemini/gemini-2.0-flash' or 'anthropic/claude-sonnet-4-5-20250929'
         return model_lower.split('/')[0]
     elif ':' in model_lower:
         return model_lower.split(':')[0]

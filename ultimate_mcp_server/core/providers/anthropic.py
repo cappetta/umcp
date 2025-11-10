@@ -18,6 +18,8 @@ from ultimate_mcp_server.utils import get_logger
 # Use the same naming scheme everywhere: logger at module level
 logger = get_logger("ultimate_mcp_server.providers.anthropic")
 
+DEFAULT_SONNET_TEMPERATURE = 0.7
+
 
 class AnthropicProvider(BaseProvider):
     """Provider implementation for Anthropic (Claude) API."""
@@ -81,13 +83,34 @@ class AnthropicProvider(BaseProvider):
             self.is_initialized = False
             return False
 
+    def _resolve_sampling_parameters(
+        self,
+        requested_temperature: Optional[float],
+        extra_params: Dict[str, Any],
+    ) -> Tuple[Optional[float], Optional[float]]:
+        """Normalize sampling parameters for Claude Sonnet 4.5 requests."""
+
+        top_p = extra_params.pop("top_p", None)
+        temperature = requested_temperature
+
+        if top_p is not None:
+            if temperature is not None:
+                self.logger.debug(
+                    "top_p provided; omitting temperature to satisfy Claude Sonnet 4.5 sampling requirements"
+                )
+            temperature = None
+        elif temperature is None:
+            temperature = DEFAULT_SONNET_TEMPERATURE
+
+        return temperature, top_p
+
     async def generate_completion(
         self,
         prompt: Optional[str] = None,
         messages: Optional[List[Dict[str, Any]]] = None,
         model: Optional[str] = None,
         max_tokens: Optional[int] = 1024,  # Signature default
-        temperature: float = 0.7,
+        temperature: Optional[float] = None,
         json_mode: bool = False,
         **kwargs,
     ) -> ModelResponse:
@@ -98,7 +121,8 @@ class AnthropicProvider(BaseProvider):
             messages: List of message dictionaries, alternative to prompt.
             model: Model name to use (e.g., "claude-3-opus-20240229").
             max_tokens: Maximum tokens to generate. Defaults to 1024.
-            temperature: Temperature parameter (0.0-1.0).
+            temperature: Temperature parameter (0.0-1.0). Set to ``None`` to use
+                provider defaults or when specifying ``top_p``.
             json_mode: If True, attempt to guide model towards JSON output (via prompting).
             **kwargs: Additional model-specific parameters (e.g., top_p, system).
 
@@ -161,13 +185,20 @@ class AnthropicProvider(BaseProvider):
                 self.logger.warning("Could not find user message to append JSON instruction for simple prompt case.")
 
         # Prepare API call parameters using max_tokens directly from signature
+        resolved_temperature, resolved_top_p = self._resolve_sampling_parameters(
+            temperature, kwargs
+        )
+
         api_params = {
             "messages": current_api_messages,
             "model": actual_model_name,
             "max_tokens": max_tokens, # Uses max_tokens from signature (which defaults to 1024 if not passed)
-            "temperature": temperature,
-            **kwargs,  # Pass remaining kwargs (like top_p, etc.) that were not popped
+            **kwargs,  # Pass remaining kwargs (like system)
         }
+        if resolved_temperature is not None:
+            api_params["temperature"] = resolved_temperature
+        if resolved_top_p is not None:
+            api_params["top_p"] = resolved_top_p
         if system_prompt: # Add system prompt if it was extracted
             api_params["system"] = system_prompt
         
@@ -243,6 +274,14 @@ class AnthropicProvider(BaseProvider):
             if original_text_for_json_check != completion_text:
                 self.logger.debug("Extracted JSON content from Anthropic response post-processing (simple prompt case).")
 
+        stop_reason = getattr(response, "stop_reason", None)
+        metadata = {"stop_reason": stop_reason}
+        if stop_reason == "refusal":
+            metadata["refusal"] = True
+            self.logger.warning(
+                "Anthropic completion returned a refusal stop reason", emoji_key="warning"
+            )
+
         result = ModelResponse(
             text=completion_text,
             model=f"{self.provider_name}/{actual_model_name}",
@@ -251,6 +290,7 @@ class AnthropicProvider(BaseProvider):
             output_tokens=response.usage.output_tokens,
             processing_time=processing_time,
             raw_response=response.model_dump(),
+            metadata=metadata,
         )
         result.message = {"role": "assistant", "content": completion_text}
 
@@ -261,6 +301,7 @@ class AnthropicProvider(BaseProvider):
             tokens={"input": result.input_tokens, "output": result.output_tokens},
             cost=result.cost,
             time=result.processing_time,
+            stop_reason=stop_reason,
         )
         return result
 
@@ -272,7 +313,7 @@ class AnthropicProvider(BaseProvider):
         ],  # Use Dict for broader compatibility, or specific MessageParam type
         model: Optional[str] = None,
         max_tokens: Optional[int] = 1024,  # Provide a default
-        temperature: float = 0.7,
+        temperature: Optional[float] = None,
         json_mode: bool = False,  # Add json_mode parameter
         **kwargs,
     ) -> ModelResponse:
@@ -283,7 +324,8 @@ class AnthropicProvider(BaseProvider):
                       Should conform to Anthropic's expected format.
             model: Model name to use (e.g., "claude-3-opus-20240229").
             max_tokens: Maximum tokens to generate. Defaults to 1024.
-            temperature: Temperature parameter (0.0-1.0).
+            temperature: Temperature parameter (0.0-1.0). Set to ``None`` to use
+                provider defaults or when specifying ``top_p``.
             json_mode: If True, guide the model to generate JSON output (via prompt engineering).
             **kwargs: Additional model-specific parameters (e.g., top_p, system).
 
@@ -350,13 +392,20 @@ class AnthropicProvider(BaseProvider):
                 system_prompt = "You must respond ONLY with valid JSON. Do not include explanations or markdown formatting."
 
         # Prepare API call parameters
+        resolved_temperature, resolved_top_p = self._resolve_sampling_parameters(
+            temperature, kwargs
+        )
+
         api_params = {
             "messages": processed_messages,
             "model": actual_model_name,
             "max_tokens": max_tokens,
-            "temperature": temperature,
-            **kwargs,  # Pass remaining kwargs (like top_p, etc.)
+            **kwargs,  # Pass remaining kwargs (like system)
         }
+        if resolved_temperature is not None:
+            api_params["temperature"] = resolved_temperature
+        if resolved_top_p is not None:
+            api_params["top_p"] = resolved_top_p
         if system_prompt:
             api_params["system"] = system_prompt
 
@@ -385,6 +434,15 @@ class AnthropicProvider(BaseProvider):
             raise ValueError(f"Unexpected response format from Anthropic API: {response}")
         assistant_content = response.content[0].text
 
+        stop_reason = getattr(response, "stop_reason", None)
+        metadata = {"stop_reason": stop_reason}
+        if stop_reason == "refusal":
+            metadata["refusal"] = True
+            self.logger.warning(
+                "Anthropic chat completion returned a refusal stop reason",
+                emoji_key="warning",
+            )
+
         # Create standardized response including the assistant message
         result = ModelResponse(
             text=assistant_content,  # Keep raw text accessible
@@ -394,6 +452,7 @@ class AnthropicProvider(BaseProvider):
             output_tokens=response.usage.output_tokens,
             processing_time=processing_time,
             raw_response=response.model_dump(),  # Use model_dump() if Pydantic
+            metadata=metadata,
         )
         
         # Add message to result for chat_completion
@@ -407,6 +466,7 @@ class AnthropicProvider(BaseProvider):
             tokens={"input": result.input_tokens, "output": result.output_tokens},
             cost=result.cost,
             time=result.processing_time,
+            stop_reason=stop_reason,
         )
 
         return result
@@ -420,7 +480,7 @@ class AnthropicProvider(BaseProvider):
         messages: Optional[List[Dict[str, Any]]] = None,  # Allow messages directly
         model: Optional[str] = None,
         max_tokens: Optional[int] = 1024,  # Default max_tokens
-        temperature: float = 0.7,
+        temperature: Optional[float] = None,
         json_mode: bool = False,  # Accept json_mode flag
         **kwargs,
     ) -> AsyncGenerator[Tuple[str, Dict[str, Any]], None]:
@@ -431,7 +491,8 @@ class AnthropicProvider(BaseProvider):
             messages: (Optional) List of message dictionaries. Takes precedence over prompt.
             model: Model name to use.
             max_tokens: Maximum tokens to generate. Defaults to 1024.
-            temperature: Temperature parameter.
+            temperature: Temperature parameter. Set to ``None`` to use provider
+                defaults or when specifying ``top_p``.
             json_mode: If True, guides model towards JSON (via prompting if using prompt input).
             **kwargs: Additional parameters (system, top_p, etc.).
 
@@ -509,13 +570,20 @@ class AnthropicProvider(BaseProvider):
                 system_prompt = "You must respond ONLY with valid JSON matching the expected schema. Do not include explanations or markdown formatting."
 
         # Prepare API call parameters
+        resolved_temperature, resolved_top_p = self._resolve_sampling_parameters(
+            temperature, kwargs
+        )
+
         params = {
             "model": actual_model_name,
             "messages": processed_messages,
-            "temperature": temperature,
             "max_tokens": max_tokens,  # Use the default or provided value
             **kwargs,  # Pass remaining kwargs
         }
+        if resolved_temperature is not None:
+            params["temperature"] = resolved_temperature
+        if resolved_top_p is not None:
+            params["top_p"] = resolved_top_p
         if system_prompt:
             params["system"] = system_prompt
 
@@ -555,7 +623,13 @@ class AnthropicProvider(BaseProvider):
                     final_input_tokens = final_message.usage.input_tokens if hasattr(final_message, 'usage') else 0
                     final_output_tokens = final_message.usage.output_tokens if hasattr(final_message, 'usage') else 0
                     # Ensure finish_reason is captured from the final message
-                    finish_reason = final_message.stop_reason if hasattr(final_message, 'stop_reason') else "unknown"
+                    stop_reason = getattr(final_message, 'stop_reason', None)
+                    finish_reason = stop_reason or "unknown"
+                    if stop_reason == "refusal":
+                        self.logger.warning(
+                            "Anthropic streaming completion returned a refusal stop reason",
+                            emoji_key="warning",
+                        )
                 except Exception as e:
                     # If we can't get the final message for any reason, log it but continue
                     self.logger.warning(f"Couldn't get final message stats: {e}")
@@ -565,9 +639,10 @@ class AnthropicProvider(BaseProvider):
                     final_output_tokens = total_chunks * 5  # Very rough estimate
 
             processing_time = time.time() - start_time
-            self.logger.success(
-                "Anthropic streaming completion successful",
-                emoji_key="success",
+            log_fn = self.logger.success if finish_reason != "refusal" else self.logger.warning
+            log_fn(
+                "Anthropic streaming completion successful" if finish_reason != "refusal" else "Anthropic streaming completion ended with refusal",
+                emoji_key="success" if finish_reason != "refusal" else "warning",
                 model=f"{self.provider_name}/{actual_model_name}",
                 chunks=total_chunks,
                 tokens={"input": final_input_tokens, "output": final_output_tokens},
@@ -585,6 +660,7 @@ class AnthropicProvider(BaseProvider):
                 "total_tokens": final_input_tokens + final_output_tokens,
                 "processing_time": processing_time,
                 "finish_reason": finish_reason,
+                "stop_reason": stop_reason if 'stop_reason' in locals() else finish_reason,
             }
             yield "", final_metadata
 
@@ -603,6 +679,7 @@ class AnthropicProvider(BaseProvider):
                 "chunk_index": total_chunks + 1,
                 "error": f"{type(e).__name__}: {str(e)}",
                 "finish_reason": "error",
+                "stop_reason": "error",
                 "processing_time": processing_time,
             }
             yield "", error_metadata
@@ -619,8 +696,8 @@ class AnthropicProvider(BaseProvider):
         static_models = [
             # Define with the full ID including provider prefix
             {
-                "id": f"{self.provider_name}/claude-3-7-sonnet-20250219",
-                "name": "Claude 3.7 Sonnet",
+                "id": f"{self.provider_name}/claude-sonnet-4-5-20250929",
+                "name": "Claude Sonnet 4.5",
                 "context_window": 200000,
                 "input_cost_pmt": 3.0,
                 "output_cost_pmt": 15.0,
